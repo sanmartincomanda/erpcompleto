@@ -1,0 +1,1798 @@
+// src/services/unifiedAccountingService.js
+// Servicio unificado de contabilidad con códigos DGI Nicaragua
+
+import { db } from '../firebase';
+import { 
+    collection, 
+    addDoc, 
+    doc, 
+    deleteDoc,
+    updateDoc, 
+    getDoc, 
+    getDocs, 
+    query, 
+    setDoc,
+    where, 
+    Timestamp,
+    orderBy,
+    limit,
+    writeBatch
+} from 'firebase/firestore';
+import {
+    calculateArqueoTotals,
+    calculateCierreCajaTotals,
+    getTipoCambio,
+    toNumber
+} from '../utils/cierreCajaCalculations';
+
+// Tipos de documentos para asientos contables
+export const DOCUMENT_TYPES = {
+    CIERRE_CAJA: 'cierreCaja',
+    DEPOSITO: 'deposito',
+    CONFIRMACION_DEPOSITO: 'confirmacionDeposito',
+    FACTURA_PROVEEDOR: 'facturaProveedor',
+    PAGO_PROVEEDOR: 'pagoProveedor',
+    GASTO: 'gasto',
+    INGRESO: 'ingreso',
+    DIFERENCIA_CAJA: 'diferenciaCaja',
+    AJUSTE: 'ajuste'
+};
+
+// ============================================
+// FUNCIONES AUXILIARES PARA BUSCAR CUENTAS
+// ============================================
+
+/**
+ * Busca una cuenta por su código exacto
+ */
+const getCuentaByCode = async (code) => {
+    if (!code) return null;
+    const accountsRef = collection(db, 'planCuentas');
+    const q = query(accountsRef, where('code', '==', code));
+    const snap = await getDocs(q);
+    return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+};
+
+/**
+ * Busca una cuenta por nombre (búsqueda parcial)
+ */
+const getCuentaByName = async (searchTerm) => {
+    if (!searchTerm) return null;
+    const accountsRef = collection(db, 'planCuentas');
+    const snap = await getDocs(accountsRef);
+    const accounts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    return accounts.find(a => 
+        a.name?.toLowerCase().includes(searchTerm.toLowerCase()) && !a.isGroup
+    ) || null;
+};
+
+/**
+ * Obtiene la primera cuenta que coincida con el tipo y subtipo
+ */
+const getCuentaByType = async (type, subType) => {
+    const accountsRef = collection(db, 'planCuentas');
+    let q = query(accountsRef, where('type', '==', type));
+    if (subType) {
+        q = query(q, where('subType', '==', subType));
+    }
+    const snap = await getDocs(q);
+    return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+};
+
+// ============================================
+// CUENTAS DGI NICARAGUA - MAPEO
+// ============================================
+
+const CUENTAS_DGI = {
+    // ACTIVOS
+    CAJA_GENERAL: '110101',
+    CAJA_CHICA: '110102',
+    BANCO_BAC_NIO: '11010301',
+    BANCO_BAC_USD: '11010302',
+    BANCO_BANPRO_NIO: '11010303',
+    BANCO_BANPRO_USD: '11010304',
+    BANCO_LAFISE_NIO: '11010305',
+    BANCO_LAFISE_USD: '11010306',
+    DINERO_TRANSITO: '110104',
+    CLIENTES: '110301',
+    DEUDORES_VARIOS: '110303',
+    INVENTARIO_MERCADERIA: '110401',
+    IR_ANTICIPADO: '110505',
+    
+    // PASIVOS
+    PROVEEDORES: '210101',
+    IVA_POR_PAGAR: '210301',
+    IR_POR_PAGAR: '210302',
+    ALCALDIA_POR_PAGAR: '210303',
+    
+    // INGRESOS
+    VENTAS_MERCADERIA: '410101',
+    VENTAS_PRODUCTOS: '410102',
+    VENTAS_SERVICIOS: '410103',
+    
+    // COSTOS
+    COSTO_VENTAS: '510101',
+    
+    // GASTOS
+    GASTOS_ADMIN: '6101',
+    GASTOS_VENTAS: '6102',
+    GASTO_ALCALDIA_VENTAS: '610304',
+    GASTOS_EXTRAORDINARIOS: '610302'
+};
+
+const TIPOS_DEUDORA = new Set(['ACTIVO', 'COSTO', 'GASTO']);
+
+const normalizeNature = (nature) => {
+    const value = String(nature || '').toUpperCase();
+
+    if (value.includes('DEUD')) return 'DEUDORA';
+    if (value.includes('ACRE')) return 'ACREEDORA';
+
+    return '';
+};
+
+const inferAccountNature = (account = {}) => {
+    const normalized = normalizeNature(account.nature);
+    if (normalized) return normalized;
+    return TIPOS_DEUDORA.has(account.type) ? 'DEUDORA' : 'ACREEDORA';
+};
+
+const hasArqueoData = (arqueo = {}) =>
+    [
+        'billetes100',
+        'billetes50',
+        'billetes20',
+        'billetes10',
+        'billetes5',
+        'billetes1',
+        'monedas',
+        'efectivoUSDFisico'
+    ].some((field) => toNumber(arqueo?.[field]) > 0);
+
+const FIRESTORE_BATCH_LIMIT = 400;
+
+const chunkItems = (items = [], chunkSize = FIRESTORE_BATCH_LIMIT) => {
+    const chunks = [];
+
+    for (let index = 0; index < items.length; index += chunkSize) {
+        chunks.push(items.slice(index, index + chunkSize));
+    }
+
+    return chunks;
+};
+
+const deleteCollectionDocuments = async (collectionName) => {
+    const snapshot = await getDocs(collection(db, collectionName));
+    let deleted = 0;
+
+    for (const chunk of chunkItems(snapshot.docs)) {
+        const batch = writeBatch(db);
+        chunk.forEach((docSnapshot) => batch.delete(docSnapshot.ref));
+        await batch.commit();
+        deleted += chunk.length;
+    }
+
+    return deleted;
+};
+
+const resetPlanCuentasBalances = async () => {
+    const snapshot = await getDocs(collection(db, 'planCuentas'));
+    let updated = 0;
+
+    for (const chunk of chunkItems(snapshot.docs)) {
+        const batch = writeBatch(db);
+        chunk.forEach((docSnapshot) => {
+            batch.update(docSnapshot.ref, {
+                balance: 0,
+                balanceUSD: 0,
+                updatedAt: Timestamp.now()
+            });
+        });
+        await batch.commit();
+        updated += chunk.length;
+    }
+
+    return updated;
+};
+
+// ============================================
+// REGISTRO DE ASIENTOS CONTABLES
+// ============================================
+
+/**
+ * Registra un asiento contable completo con partida doble
+ */
+export const registerAccountingEntry = async (entryData) => {
+    const { 
+        fecha, 
+        descripcion, 
+        referencia, 
+        documentoId, 
+        documentoTipo, 
+        moduloOrigen,
+        userId,
+        userEmail,
+        movimientos,
+        metadata = {} 
+    } = entryData;
+    const sucursalId = entryData.sucursalId || metadata.sucursalId || metadata.branchId || null;
+    const sucursalName =
+        entryData.sucursalName ||
+        metadata.sucursalName ||
+        metadata.branchName ||
+        metadata.tienda ||
+        null;
+
+    if (!Array.isArray(movimientos) || movimientos.length === 0) {
+        throw new Error('El asiento contable debe incluir al menos un movimiento');
+    }
+
+    const normalizedMovimientos = movimientos
+        .map((mov) => ({
+            ...mov,
+            monto: Number(mov.monto || 0),
+            montoUSD: Number(mov.montoUSD || 0)
+        }))
+        .filter((mov) => mov.monto > 0);
+
+    if (normalizedMovimientos.length === 0) {
+        throw new Error('El asiento contable no contiene movimientos con monto válido');
+    }
+
+    const invalidMovimiento = normalizedMovimientos.find((mov) =>
+        !mov.cuentaId ||
+        !mov.cuentaCode ||
+        !mov.cuentaName ||
+        !['DEBITO', 'CREDITO'].includes(mov.tipo)
+    );
+
+    if (invalidMovimiento) {
+        throw new Error('Todos los movimientos contables deben tener cuenta y tipo válidos');
+    }
+
+    // Validar que suma de débitos = suma de créditos
+    const totalDebitos = normalizedMovimientos
+        .filter(m => m.tipo === 'DEBITO')
+        .reduce((sum, m) => sum + Number(m.monto || 0), 0);
+    
+    const totalCreditos = normalizedMovimientos
+        .filter(m => m.tipo === 'CREDITO')
+        .reduce((sum, m) => sum + Number(m.monto || 0), 0);
+
+    if (Math.abs(totalDebitos - totalCreditos) > 0.01) {
+        throw new Error(`Partida descuadrada: Débitos C$${totalDebitos.toFixed(2)} ≠ Créditos C$${totalCreditos.toFixed(2)}`);
+    }
+
+    const timestamp = Timestamp.now();
+
+    // Crear el asiento contable
+    const asientoRef = await addDoc(collection(db, 'asientosContables'), {
+        fecha,
+        descripcion,
+        referencia,
+        documentoId,
+        documentoTipo,
+        moduloOrigen,
+        sucursalId,
+        sucursalName,
+        userId,
+        userEmail,
+        totalDebitos,
+        totalCreditos,
+        movimientos: normalizedMovimientos.map(m => ({
+            cuentaId: m.cuentaId,
+            cuentaCode: m.cuentaCode,
+            cuentaName: m.cuentaName,
+            tipo: m.tipo,
+            monto: m.monto,
+            montoUSD: m.montoUSD || 0,
+            descripcion: m.descripcion
+        })),
+        metadata,
+        createdAt: timestamp
+    });
+
+    // Crear movimientos individuales para consultas
+    const movimientosCreados = [];
+    for (const mov of normalizedMovimientos) {
+        const movRef = await addDoc(collection(db, 'movimientosContables'), {
+            fecha,
+            descripcion: mov.descripcion || descripcion,
+            referencia,
+            accountId: mov.cuentaId,
+            accountCode: mov.cuentaCode,
+            accountName: mov.cuentaName,
+            type: mov.tipo,
+            tipo: mov.tipo,
+            monto: mov.monto,
+            montoUSD: mov.montoUSD || 0,
+            asientoId: asientoRef.id,
+            documentoId,
+            documentoTipo,
+            moduloOrigen,
+            sucursalId,
+            sucursalName,
+            userId,
+            userEmail,
+            timestamp
+        });
+        movimientosCreados.push({
+            id: movRef.id,
+            asientoId: asientoRef.id,
+            accountId: mov.cuentaId,
+            accountCode: mov.cuentaCode,
+            accountName: mov.cuentaName,
+            type: mov.tipo,
+            tipo: mov.tipo,
+            ...mov
+        });
+        
+        // Actualizar saldo de la cuenta
+        await updateAccountBalance(mov.cuentaId, mov.tipo, mov.monto, mov.montoUSD || 0);
+    }
+
+    return { 
+        asientoId: asientoRef.id, 
+        movimientos: movimientosCreados,
+        totalDebitos,
+        totalCreditos
+    };
+};
+
+/**
+ * Actualiza el saldo de una cuenta contable
+ */
+const updateAccountBalance = async (accountId, tipo, monto, montoUSD) => {
+    try {
+        const accountRef = doc(db, 'planCuentas', accountId);
+        const accountSnap = await getDoc(accountRef);
+        
+        if (!accountSnap.exists()) return;
+        
+        const account = accountSnap.data();
+        const nature = inferAccountNature(account);
+        const isDeudora = nature === 'DEUDORA';
+        const movimientosSnap = await getDocs(
+            query(collection(db, 'movimientosContables'), where('accountId', '==', accountId))
+        );
+
+        let newBalance = 0;
+        let newBalanceUSD = 0;
+
+        movimientosSnap.docs.forEach((movDoc) => {
+            const mov = movDoc.data();
+            const tipoMovimiento = mov.tipo || mov.type;
+            const multiplier =
+                (tipoMovimiento === 'DEBITO' && isDeudora) ||
+                (tipoMovimiento === 'CREDITO' && !isDeudora)
+                    ? 1
+                    : -1;
+
+            newBalance += toNumber(mov.monto) * multiplier;
+            newBalanceUSD += toNumber(mov.montoUSD) * multiplier;
+        });
+        
+        await updateDoc(accountRef, {
+            balance: newBalance,
+            balanceUSD: newBalanceUSD,
+            nature,
+            updatedAt: Timestamp.now()
+        });
+    } catch (err) {
+        console.error('Error actualizando saldo:', err);
+    }
+};
+
+// ============================================
+// CIERRE DE CAJA ERP
+// ============================================
+
+/**
+ * Crea un nuevo cierre de caja ERP
+ */
+export const createCierreCajaERP = async (cierreData) => {
+    const {
+        fecha,
+        sucursalId,
+        sucursalName,
+        tienda,
+        caja,
+        cajero,
+        horaApertura,
+        horaCierre,
+        observaciones,
+        totalIngreso,
+        tipoCambio,
+        
+        // Efectivo
+        efectivoCS,
+        efectivoUSD,
+        
+        // POS
+        posBAC,
+        posBANPRO,
+        posLAFISE,
+        
+        // Transferencias NIO
+        transferenciaBAC,
+        transferenciaBANPRO,
+        transferenciaLAFISE,
+        
+        // Transferencias USD
+        transferenciaBAC_USD,
+        transferenciaLAFISE_USD,
+        
+        // Créditos y abonos
+        totalFacturasCredito,
+        facturasCredito,
+        totalAbonosRecibidos,
+        abonosRecibidos,
+        
+        // Retenciones
+        retenciones,
+        totalRetenciones,
+        
+        // Gastos de caja
+        gastosCaja,
+        totalGastosCaja,
+        
+        // Arqueo
+        arqueoRealizado,
+        arqueo,
+        
+        // Configuración
+        cuentaEfectivoId,
+        cuentaEfectivoCode,
+        cuentaEfectivoName,
+        
+        // Fotos
+        fotos,
+        
+        userId,
+        userEmail
+    } = cierreData;
+
+    const cierreTotals = calculateCierreCajaTotals(cierreData);
+    const shouldPersistArqueo = Boolean(arqueoRealizado) || hasArqueoData(arqueo);
+    const arqueoTotals = shouldPersistArqueo ? calculateArqueoTotals(cierreData) : null;
+    const arqueoCalculado = shouldPersistArqueo ? {
+        ...arqueo,
+        totalArqueoCS: arqueoTotals.totalArqueoCS,
+        efectivoUSDFisico: arqueoTotals.efectivoUSDFisico,
+        totalArqueo: arqueoTotals.totalArqueo,
+        diferenciaCS: arqueoTotals.diferenciaCaja
+    } : null;
+
+    const cierre = {
+        fecha,
+        sucursalId: sucursalId || null,
+        sucursalName: sucursalName || tienda || '',
+        tienda: sucursalName || tienda || '',
+        caja,
+        cajero,
+        horaApertura: horaApertura || null,
+        horaCierre: horaCierre || null,
+        observaciones: observaciones || '',
+        totalIngreso: Number(totalIngreso || cierreTotals.totalIngresoRegistrado || 0),
+        
+        efectivoCS: Number(efectivoCS || 0),
+        efectivoUSD: Number(efectivoUSD || 0),
+        tipoCambio: cierreTotals.tipoCambio,
+        
+        posBAC: Number(posBAC || 0),
+        posBANPRO: Number(posBANPRO || 0),
+        posLAFISE: Number(posLAFISE || 0),
+        
+        transferenciaBAC: Number(transferenciaBAC || 0),
+        transferenciaBANPRO: Number(transferenciaBANPRO || 0),
+        transferenciaLAFISE: Number(transferenciaLAFISE || 0),
+        transferenciaBAC_USD: Number(transferenciaBAC_USD || 0),
+        transferenciaLAFISE_USD: Number(transferenciaLAFISE_USD || 0),
+        
+        totalFacturasCredito: Number(totalFacturasCredito || 0),
+        facturasCredito: facturasCredito || [],
+        totalAbonosRecibidos: Number(totalAbonosRecibidos || 0),
+        abonosRecibidos: abonosRecibidos || [],
+        
+        retenciones: retenciones || [],
+        totalRetenciones: cierreTotals.totalRetenciones,
+        
+        gastosCaja: gastosCaja || [],
+        totalGastosCaja: cierreTotals.totalGastosCaja,
+        
+        arqueoRealizado: shouldPersistArqueo,
+        arqueo: arqueoCalculado,
+        
+        cuadre: {
+            totalIngreso: cierreTotals.totalIngresoRegistrado,
+            totalMediosPago: cierreTotals.totalMediosPago,
+            totalFacturasCredito: cierreTotals.totalFacturasCredito,
+            totalAbonosRecibidos: cierreTotals.totalAbonosRecibidos,
+            totalVentasDelDia: cierreTotals.totalVentasDelDia,
+            totalRetenciones: cierreTotals.totalRetenciones,
+            totalGastosCaja: cierreTotals.totalGastosCaja,
+            totalEsperado: cierreTotals.totalEsperado,
+            diferencia: cierreTotals.diferencia,
+            estaCuadrado: cierreTotals.estaCuadrado
+        },
+        
+        cuentaEfectivo: cuentaEfectivoId ? {
+            id: cuentaEfectivoId,
+            code: cuentaEfectivoCode,
+            name: cuentaEfectivoName
+        } : null,
+        
+        estado: 'borrador',
+        fotos: fotos || [],
+        movimientosContablesIds: [],
+        
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail,
+        updatedAt: Timestamp.now()
+    };
+
+    const docRef = await addDoc(collection(db, 'cierresCajaERP'), cierre);
+    return { id: docRef.id, ...cierre };
+};
+
+/**
+ * Actualiza el estado de un cierre de caja
+ */
+export const updateCierreCajaERPStatus = async (cierreId, nuevoEstado, userId) => {
+    const cierreRef = doc(db, 'cierresCajaERP', cierreId);
+    const cierreSnap = await getDoc(cierreRef);
+    
+    if (!cierreSnap.exists()) {
+        throw new Error('Cierre de caja no encontrado');
+    }
+    
+    const cierre = cierreSnap.data();
+    
+    if (nuevoEstado === 'cerrado' && !cierre.cuadre.estaCuadrado) {
+        throw new Error('No se puede cerrar: El cierre no está cuadrado. Diferencia: ' + 
+            cierre.cuadre.diferencia);
+    }
+    
+    const updates = {
+        estado: nuevoEstado,
+        updatedAt: Timestamp.now(),
+        updatedBy: userId
+    };
+    
+    if (nuevoEstado === 'cerrado') {
+        updates.cerradoAt = Timestamp.now();
+        updates.cerradoBy = userId;
+    }
+    
+    if (nuevoEstado === 'completado') {
+        updates.completadoAt = Timestamp.now();
+        updates.completadoBy = userId;
+    }
+    
+    await updateDoc(cierreRef, updates);
+    return { success: true };
+};
+
+/**
+ * Procesa un cierre de caja cerrado - Genera todos los movimientos contables
+ */
+export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
+    const cierreRef = doc(db, 'cierresCajaERP', cierreId);
+    const cierreSnap = await getDoc(cierreRef);
+
+    if (!cierreSnap.exists()) {
+        throw new Error('Cierre de caja no encontrado');
+    }
+
+    const cierre = cierreSnap.data();
+
+    if (cierre.procesado) {
+        throw new Error('Este cierre ya fue procesado anteriormente');
+    }
+
+    const movimientosGenerados = [];
+    const fecha = cierre.fecha;
+    const referencia = `CIERRE-${cierreId}`;
+    const cierreTotals = calculateCierreCajaTotals(cierre);
+    const tipoCambio = getTipoCambio(cierre.tipoCambio);
+    const sucursalId = cierre.sucursalId || null;
+    const sucursalName = cierre.sucursalName || cierre.tienda || null;
+    const totalVentasDelDia = cierreTotals.totalVentasDelDia;
+    const metadataBase = {
+        sucursalId,
+        sucursalName,
+        tienda: sucursalName,
+        caja: cierre.caja,
+        tipoCambio
+    };
+
+    const ventasAccount = await getCuentaByCode(CUENTAS_DGI.VENTAS_MERCADERIA);
+    let cajaAccount = null;
+    let clientesAccount = null;
+
+    if (!ventasAccount) {
+        throw new Error('No se encontro la cuenta de ventas (410101). Cargue el Plan DGI primero.');
+    }
+
+    if (cierre.cuentaEfectivo?.id) {
+        const cuentaSnap = await getDoc(doc(db, 'planCuentas', cierre.cuentaEfectivo.id));
+        if (cuentaSnap.exists()) {
+            cajaAccount = { id: cuentaSnap.id, ...cuentaSnap.data() };
+        }
+    }
+
+    if (!cajaAccount) {
+        cajaAccount = await getCuentaByCode(CUENTAS_DGI.CAJA_GENERAL);
+    }
+
+    if (cierreTotals.totalAbonosRecibidos > 0 || cierreTotals.totalFacturasCredito > 0) {
+        clientesAccount = await getCuentaByCode(CUENTAS_DGI.CLIENTES);
+        if (!clientesAccount) {
+            throw new Error('No se encontro la cuenta de Clientes (110301). Cargue el Plan DGI primero.');
+        }
+    }
+
+    if (totalVentasDelDia < -0.01) {
+        throw new Error('Los abonos no pueden ser mayores al Ingreso total SICAR.');
+    }
+
+    const movimientosCierre = [];
+    const retencionesProcesadas = [];
+    const agregarMovimiento = (movimiento) => {
+        if (toNumber(movimiento?.monto) <= 0) return;
+
+        movimientosCierre.push({
+            ...movimiento,
+            monto: toNumber(movimiento.monto),
+            montoUSD: toNumber(movimiento.montoUSD)
+        });
+    };
+
+    if (cajaAccount && cierreTotals.totalEfectivo > 0) {
+        agregarMovimiento({
+            cuentaId: cajaAccount.id,
+            cuentaCode: cajaAccount.code,
+            cuentaName: cajaAccount.name,
+            tipo: 'DEBITO',
+            monto: cierreTotals.totalEfectivo,
+            montoUSD: cierreTotals.efectivoUSD,
+            descripcion: `Efectivo neto en ${cierre.caja}`
+        });
+    }
+
+    const posBancos = [
+        { field: 'posBAC', code: CUENTAS_DGI.BANCO_BAC_NIO, name: 'BAC' },
+        { field: 'posBANPRO', code: CUENTAS_DGI.BANCO_BANPRO_NIO, name: 'BANPRO' },
+        { field: 'posLAFISE', code: CUENTAS_DGI.BANCO_LAFISE_NIO, name: 'LAFISE' }
+    ];
+
+    for (const pos of posBancos) {
+        const monto = toNumber(cierre[pos.field]);
+        if (monto <= 0) continue;
+
+        const posAccount = await getCuentaByCode(pos.code);
+        if (!posAccount) continue;
+
+        agregarMovimiento({
+            cuentaId: posAccount.id,
+            cuentaCode: posAccount.code,
+            cuentaName: posAccount.name,
+            tipo: 'DEBITO',
+            monto,
+            montoUSD: 0,
+            descripcion: `POS ${pos.name}`
+        });
+    }
+    const transferencias = [
+        { field: 'transferenciaBAC', code: CUENTAS_DGI.BANCO_BAC_NIO, name: 'BAC' },
+        { field: 'transferenciaBANPRO', code: CUENTAS_DGI.BANCO_BANPRO_NIO, name: 'BANPRO' },
+        { field: 'transferenciaLAFISE', code: CUENTAS_DGI.BANCO_LAFISE_NIO, name: 'LAFISE' }
+    ];
+
+    for (const trans of transferencias) {
+        const monto = toNumber(cierre[trans.field]);
+        if (monto <= 0) continue;
+
+        const transAccount = await getCuentaByCode(trans.code);
+        if (!transAccount) continue;
+
+        agregarMovimiento({
+            cuentaId: transAccount.id,
+            cuentaCode: transAccount.code,
+            cuentaName: transAccount.name,
+            tipo: 'DEBITO',
+            monto,
+            montoUSD: 0,
+            descripcion: `Transferencia ${trans.name}`
+        });
+    }
+
+    const transferenciasUSD = [
+        { field: 'transferenciaBAC_USD', code: CUENTAS_DGI.BANCO_BAC_USD, name: 'BAC USD' },
+        { field: 'transferenciaLAFISE_USD', code: CUENTAS_DGI.BANCO_LAFISE_USD, name: 'LAFISE USD' }
+    ];
+
+    for (const trans of transferenciasUSD) {
+        const montoUSD = toNumber(cierre[trans.field]);
+        if (montoUSD <= 0) continue;
+
+        const transAccount = await getCuentaByCode(trans.code);
+        if (!transAccount) continue;
+
+        agregarMovimiento({
+            cuentaId: transAccount.id,
+            cuentaCode: transAccount.code,
+            cuentaName: transAccount.name,
+            tipo: 'DEBITO',
+            monto: montoUSD * tipoCambio,
+            montoUSD,
+            descripcion: `Transferencia ${trans.name}`
+        });
+    }
+
+    for (const gasto of cierre.gastosCaja || []) {
+        const monto = toNumber(gasto?.monto);
+        if (monto <= 0) continue;
+
+        let gastoAccount = null;
+        if (gasto.cuentaContableId) {
+            const cuentaSnap = await getDoc(doc(db, 'planCuentas', gasto.cuentaContableId));
+            if (cuentaSnap.exists()) {
+                gastoAccount = { id: cuentaSnap.id, ...cuentaSnap.data() };
+            }
+        }
+
+        if (!gastoAccount) {
+            gastoAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_ADMIN);
+        }
+
+        if (!gastoAccount) continue;
+
+        agregarMovimiento({
+            cuentaId: gastoAccount.id,
+            cuentaCode: gastoAccount.code,
+            cuentaName: gastoAccount.name,
+            tipo: 'DEBITO',
+            monto,
+            montoUSD: 0,
+            descripcion: gasto.concepto || 'Gasto de caja'
+        });
+    }
+
+    for (const retencion of cierre.retenciones || []) {
+        const monto = toNumber(retencion?.monto);
+        if (monto <= 0) continue;
+
+        const tipoRetencion = String(retencion?.tipo || '').toUpperCase();
+        let cuentaPasivo = null;
+
+        if (retencion?.cuentaPasivoId) {
+            const cuentaSnap = await getDoc(doc(db, 'planCuentas', retencion.cuentaPasivoId));
+            if (cuentaSnap.exists()) {
+                cuentaPasivo = { id: cuentaSnap.id, ...cuentaSnap.data() };
+            }
+        }
+
+        if (!cuentaPasivo) {
+            cuentaPasivo =
+                tipoRetencion === 'IR'
+                    ? await getCuentaByCode(CUENTAS_DGI.IR_POR_PAGAR)
+                    : await getCuentaByCode(CUENTAS_DGI.ALCALDIA_POR_PAGAR) ||
+                      await getCuentaByCode('210304');
+        }
+
+        if (!cuentaPasivo) continue;
+
+        const cuentaPasivoCode = String(cuentaPasivo.code || '').replace(/\./g, '');
+        let cuentaCargo = null;
+
+        if (cuentaPasivoCode === CUENTAS_DGI.IR_POR_PAGAR) {
+            cuentaCargo =
+                await getCuentaByCode(CUENTAS_DGI.IR_ANTICIPADO) ||
+                await getCuentaByCode(CUENTAS_DGI.DEUDORES_VARIOS);
+        } else if (cuentaPasivoCode === CUENTAS_DGI.ALCALDIA_POR_PAGAR) {
+            cuentaCargo =
+                await getCuentaByCode(CUENTAS_DGI.GASTO_ALCALDIA_VENTAS) ||
+                await getCuentaByCode(CUENTAS_DGI.DEUDORES_VARIOS);
+        } else {
+            cuentaCargo =
+                await getCuentaByCode(CUENTAS_DGI.DEUDORES_VARIOS) ||
+                await getCuentaByCode(CUENTAS_DGI.GASTOS_ADMIN);
+        }
+
+        if (!cuentaCargo) continue;
+
+        retencionesProcesadas.push({
+            monto,
+            tipoRetencion,
+            cuentaCargo,
+            cuentaPasivo,
+            cliente: retencion?.cliente || '',
+            facturaRelacionada: retencion?.facturaRelacionada || ''
+        });
+    }
+
+    const totalRetencionesProcesadas = retencionesProcesadas.reduce(
+        (sum, retencion) => sum + toNumber(retencion.monto),
+        0
+    );
+    const totalVentasReconocidas = totalVentasDelDia - totalRetencionesProcesadas;
+
+    if (totalVentasReconocidas < -0.01) {
+        throw new Error('Las retenciones no pueden exceder las ventas del dia registradas en el cierre.');
+    }
+
+    for (const retencion of retencionesProcesadas) {
+        const descripcionBase = retencion.facturaRelacionada
+            ? `${retencion.cuentaPasivo.name} factura ${retencion.facturaRelacionada}`
+            : `${retencion.cuentaPasivo.name} registrada en cierre`;
+
+        agregarMovimiento({
+            cuentaId: retencion.cuentaCargo.id,
+            cuentaCode: retencion.cuentaCargo.code,
+            cuentaName: retencion.cuentaCargo.name,
+            tipo: 'DEBITO',
+            monto: retencion.monto,
+            montoUSD: 0,
+            descripcion: descripcionBase
+        });
+
+        agregarMovimiento({
+            cuentaId: retencion.cuentaPasivo.id,
+            cuentaCode: retencion.cuentaPasivo.code,
+            cuentaName: retencion.cuentaPasivo.name,
+            tipo: 'CREDITO',
+            monto: retencion.monto,
+            montoUSD: 0,
+            descripcion: `Saldo pendiente con entidad - ${retencion.cliente || 'Cierre de caja'}`
+        });
+    }
+
+    if (totalVentasReconocidas > 0) {
+        agregarMovimiento({
+            cuentaId: ventasAccount.id,
+            cuentaCode: ventasAccount.code,
+            cuentaName: ventasAccount.name,
+            tipo: 'CREDITO',
+            monto: totalVentasReconocidas,
+            montoUSD: 0,
+            descripcion: 'Ventas del dia registradas en cierre'
+        });
+    }
+
+    if (cierreTotals.totalAbonosRecibidos > 0 && clientesAccount) {
+        agregarMovimiento({
+            cuentaId: clientesAccount.id,
+            cuentaCode: clientesAccount.code,
+            cuentaName: clientesAccount.name,
+            tipo: 'CREDITO',
+            monto: cierreTotals.totalAbonosRecibidos,
+            montoUSD: 0,
+            descripcion: 'Abonos aplicados a cuentas por cobrar'
+        });
+    }
+
+    if (movimientosCierre.length > 0) {
+        const totalDebitos = movimientosCierre
+            .filter((mov) => mov.tipo === 'DEBITO')
+            .reduce((sum, mov) => sum + toNumber(mov.monto), 0);
+        const totalCreditos = movimientosCierre
+            .filter((mov) => mov.tipo === 'CREDITO')
+            .reduce((sum, mov) => sum + toNumber(mov.monto), 0);
+
+        if (Math.abs(totalDebitos - totalCreditos) > 0.01) {
+            throw new Error(
+                `El asiento del cierre no cuadra. Debitos: ${totalDebitos.toFixed(2)}, Creditos: ${totalCreditos.toFixed(2)}.`
+            );
+        }
+
+        const entry = await registerAccountingEntry({
+            fecha,
+            descripcion: `Cierre de caja ${cierre.caja} ${fecha}`,
+            referencia,
+            documentoId: cierreId,
+            documentoTipo: DOCUMENT_TYPES.CIERRE_CAJA,
+            moduloOrigen: 'cierreCaja',
+            sucursalId,
+            sucursalName,
+            userId,
+            userEmail,
+            movimientos: movimientosCierre,
+            metadata: {
+                ...metadataBase,
+                tipo: 'cierreConsolidado',
+                totalIngresoSicar: cierreTotals.totalIngresoRegistrado,
+                totalVentasBrutasCierre: totalVentasDelDia,
+                totalVentasDelDia: totalVentasReconocidas,
+                totalAbonosRecibidos: cierreTotals.totalAbonosRecibidos,
+                totalRetenciones: cierreTotals.totalRetenciones,
+                totalRetencionesProcesadas,
+                totalGastosCaja: cierreTotals.totalGastosCaja,
+                totalMediosPago: cierreTotals.totalMediosPago
+            }
+        });
+        movimientosGenerados.push(...entry.movimientos);
+    }
+
+    if (cierreTotals.totalFacturasCredito > 0 && clientesAccount) {
+        const entry = await registerAccountingEntry({
+            fecha,
+            descripcion: `Facturas de credito - Cierre ${cierre.caja}`,
+            referencia,
+            documentoId: cierreId,
+            documentoTipo: DOCUMENT_TYPES.CIERRE_CAJA,
+            moduloOrigen: 'cierreCaja',
+            sucursalId,
+            sucursalName,
+            userId,
+            userEmail,
+            movimientos: [
+                {
+                    cuentaId: clientesAccount.id,
+                    cuentaCode: clientesAccount.code,
+                    cuentaName: clientesAccount.name,
+                    tipo: 'DEBITO',
+                    monto: cierreTotals.totalFacturasCredito,
+                    montoUSD: 0,
+                    descripcion: 'Creditos del dia'
+                },
+                {
+                    cuentaId: ventasAccount.id,
+                    cuentaCode: ventasAccount.code,
+                    cuentaName: ventasAccount.name,
+                    tipo: 'CREDITO',
+                    monto: cierreTotals.totalFacturasCredito,
+                    montoUSD: 0,
+                    descripcion: 'Ventas al credito del dia'
+                }
+            ],
+            metadata: {
+                ...metadataBase,
+                tipo: 'credito',
+                montoTotal: cierreTotals.totalFacturasCredito
+            }
+        });
+        movimientosGenerados.push(...entry.movimientos);
+    }
+
+    if (cierre.arqueoRealizado && cierre.arqueo && Math.abs(cierre.arqueo.diferenciaCS) > 0.01) {
+        const diferencia = cierre.arqueo.diferenciaCS;
+        const esFaltante = diferencia < 0;
+        const montoDiferencia = Math.abs(diferencia);
+        const gastosExtraAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+
+        if (gastosExtraAccount && cajaAccount) {
+            const movimientosDiferencia = esFaltante
+                ? [
+                    {
+                        cuentaId: gastosExtraAccount.id,
+                        cuentaCode: gastosExtraAccount.code,
+                        cuentaName: gastosExtraAccount.name,
+                        tipo: 'DEBITO',
+                        monto: montoDiferencia,
+                        montoUSD: 0,
+                        descripcion: `Faltante de caja - ${cierre.cajero}`
+                    },
+                    {
+                        cuentaId: cajaAccount.id,
+                        cuentaCode: cajaAccount.code,
+                        cuentaName: cajaAccount.name,
+                        tipo: 'CREDITO',
+                        monto: montoDiferencia,
+                        montoUSD: 0,
+                        descripcion: 'Ajuste por faltante'
+                    }
+                ]
+                : [
+                    {
+                        cuentaId: cajaAccount.id,
+                        cuentaCode: cajaAccount.code,
+                        cuentaName: cajaAccount.name,
+                        tipo: 'DEBITO',
+                        monto: montoDiferencia,
+                        montoUSD: 0,
+                        descripcion: 'Ajuste por sobrante'
+                    },
+                    {
+                        cuentaId: gastosExtraAccount.id,
+                        cuentaCode: gastosExtraAccount.code,
+                        cuentaName: gastosExtraAccount.name,
+                        tipo: 'CREDITO',
+                        monto: montoDiferencia,
+                        montoUSD: 0,
+                        descripcion: 'Sobrante de caja'
+                    }
+                ];
+
+            const entry = await registerAccountingEntry({
+                fecha,
+                descripcion: `${esFaltante ? 'Faltante' : 'Sobrante'} de caja - ${cierre.cajero}`,
+                referencia,
+                documentoId: cierreId,
+                documentoTipo: DOCUMENT_TYPES.DIFERENCIA_CAJA,
+                moduloOrigen: 'cierreCaja',
+                sucursalId,
+                sucursalName,
+                userId,
+                userEmail,
+                movimientos: movimientosDiferencia,
+                metadata: {
+                    ...metadataBase,
+                    tipo: esFaltante ? 'faltante' : 'sobrante',
+                    monto: montoDiferencia,
+                    cajero: cierre.cajero
+                }
+            });
+            movimientosGenerados.push(...entry.movimientos);
+        }
+    }
+
+    await updateDoc(cierreRef, {
+        procesado: true,
+        procesadoAt: Timestamp.now(),
+        movimientosContablesIds: movimientosGenerados.map((mov) => mov.id),
+        totalMovimientos: movimientosGenerados.length
+    });
+
+    return {
+        success: true,
+        movimientosGenerados: movimientosGenerados.length
+    };
+};
+
+// ============================================
+// DEPÓSITOS EN TRÁNSITO
+// ============================================
+
+/**
+ * Crea un depósito en tránsito
+ */
+export const createDepositoTransitoERP = async (depositoData) => {
+    const {
+        fecha,
+        sucursalId,
+        sucursalName,
+        responsable,
+        moneda,
+        cuentasOrigen,
+        total,
+        observaciones,
+        userId,
+        userEmail
+    } = depositoData;
+
+    // Buscar cuenta de Dinero en Tránsito
+    const transitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
+    
+    if (!transitoAccount) {
+        throw new Error('No se encontró la cuenta de Dinero en Tránsito (110104). Cargue el Plan DGI primero.');
+    }
+
+    // Generar número de depósito
+    const depositosRef = collection(db, 'depositosTransito');
+    const q = query(depositosRef, orderBy('numero', 'desc'), limit(1));
+    const lastDeposito = await getDocs(q);
+    const numero = lastDeposito.empty ? 1 : (lastDeposito.docs[0].data().numero || 0) + 1;
+    const depositoRef = doc(collection(db, 'depositosTransito'));
+
+    // Crear movimientos contables
+    const movimientos = [];
+    
+    for (const cuenta of cuentasOrigen) {
+        // Débito a Dinero en Tránsito
+        movimientos.push({
+            cuentaId: transitoAccount.id,
+            cuentaCode: transitoAccount.code,
+            cuentaName: transitoAccount.name,
+            tipo: 'DEBITO',
+            monto: cuenta.monto,
+            montoUSD: moneda === 'USD' ? cuenta.monto : 0,
+            descripcion: `Depósito en tránsito desde ${cuenta.accountName}`
+        });
+        
+        // Crédito a la cuenta de origen
+        movimientos.push({
+            cuentaId: cuenta.accountId,
+            cuentaCode: cuenta.accountCode,
+            cuentaName: cuenta.accountName,
+            tipo: 'CREDITO',
+            monto: cuenta.monto,
+            montoUSD: moneda === 'USD' ? cuenta.monto : 0,
+            descripcion: `Salida para depósito en tránsito`
+        });
+    }
+
+    // Registrar asiento contable
+    const entry = await registerAccountingEntry({
+        fecha,
+        descripcion: `Depósito en Tránsito #${numero} - ${responsable}`,
+        referencia: `DEP-TRANS-${numero}`,
+        documentoId: depositoRef.id,
+        documentoTipo: DOCUMENT_TYPES.DEPOSITO,
+        moduloOrigen: 'depositoTransito',
+        sucursalId,
+        sucursalName,
+        userId,
+        userEmail,
+        movimientos,
+        metadata: { numero, responsable, moneda, total, sucursalId, sucursalName }
+    });
+
+    // Crear el depósito
+    const deposito = {
+        documentoId: depositoRef.id,
+        numero,
+        fecha,
+        sucursalId,
+        sucursalName,
+        responsable,
+        moneda,
+        cuentasOrigen,
+        total,
+        observaciones,
+        estado: 'pendiente',
+        movimientosContablesIds: entry.movimientos.map(m => m.id),
+        asientoId: entry.asientoId,
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail
+    };
+
+    await setDoc(depositoRef, deposito);
+    return { id: depositoRef.id, ...deposito };
+};
+
+/**
+ * Confirma un depósito bancario
+ */
+export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData) => {
+    const {
+        bancoDestinoId,
+        bancoDestinoCode,
+        bancoDestinoName,
+        fechaDeposito,
+        horaDeposito,
+        referenciaBancaria,
+        comprobanteURL,
+        comentarios,
+        userId,
+        userEmail
+    } = confirmacionData;
+
+    // Obtener el depósito
+    const depositoRef = doc(db, 'depositosTransito', depositoId);
+    const depositoSnap = await getDoc(depositoRef);
+    
+    if (!depositoSnap.exists()) {
+        throw new Error('Depósito no encontrado');
+    }
+    
+    const deposito = depositoSnap.data();
+    
+    if (deposito.estado === 'confirmado') {
+        throw new Error('Este depósito ya fue confirmado');
+    }
+
+    // Buscar cuentas
+    const transitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
+    const bancoAccount = await getDoc(doc(db, 'planCuentas', bancoDestinoId));
+    
+    if (!transitoAccount) {
+        throw new Error('No se encontró la cuenta de Dinero en Tránsito');
+    }
+    
+    if (!bancoAccount.exists()) {
+        throw new Error('Cuenta bancaria destino no encontrada');
+    }
+    
+    const bancoData = { id: bancoAccount.id, ...bancoAccount.data() };
+
+    // Crear movimientos de confirmación
+    const movimientos = [];
+    
+    for (const cuenta of deposito.cuentasOrigen) {
+        // Débito al banco destino
+        movimientos.push({
+            cuentaId: bancoData.id,
+            cuentaCode: bancoData.code,
+            cuentaName: bancoData.name,
+            tipo: 'DEBITO',
+            monto: cuenta.monto,
+            montoUSD: deposito.moneda === 'USD' ? cuenta.monto : 0,
+            descripcion: `Depósito confirmado - Ref: ${referenciaBancaria}`
+        });
+        
+        // Crédito a Dinero en Tránsito (liberación)
+        movimientos.push({
+            cuentaId: transitoAccount.id,
+            cuentaCode: transitoAccount.code,
+            cuentaName: transitoAccount.name,
+            tipo: 'CREDITO',
+            monto: cuenta.monto,
+            montoUSD: deposito.moneda === 'USD' ? cuenta.monto : 0,
+            descripcion: `Liberación de depósito en tránsito #${deposito.numero}`
+        });
+    }
+
+    // Registrar asiento contable
+    const entry = await registerAccountingEntry({
+        fecha: fechaDeposito,
+        descripcion: `Confirmación Depósito #${deposito.numero} - ${bancoData.name}`,
+        referencia: referenciaBancaria,
+        documentoId: depositoId,
+        documentoTipo: DOCUMENT_TYPES.CONFIRMACION_DEPOSITO,
+        moduloOrigen: 'confirmacionDeposito',
+        sucursalId: deposito.sucursalId || null,
+        sucursalName: deposito.sucursalName || null,
+        userId,
+        userEmail,
+        movimientos,
+        metadata: { 
+            depositoNumero: deposito.numero,
+            bancoDestino: bancoData.name,
+            referenciaBancaria,
+            fechaDeposito,
+            horaDeposito,
+            sucursalId: deposito.sucursalId || null,
+            sucursalName: deposito.sucursalName || null
+        }
+    });
+
+    // Actualizar el depósito
+    const updateData = {
+        estado: 'confirmado',
+        confirmadoAt: Timestamp.now(),
+        confirmadoBy: userId,
+        confirmadoByEmail: userEmail,
+        bancoDestinoId,
+        bancoDestinoCode,
+        bancoDestinoName,
+        fechaDeposito,
+        horaDeposito,
+        referenciaBancaria,
+        comentarios,
+        movimientosConfirmacionIds: entry.movimientos.map(m => m.id),
+        asientoConfirmacionId: entry.asientoId
+    };
+    
+    // Solo incluir comprobanteURL si tiene valor
+    if (comprobanteURL) {
+        updateData.comprobanteURL = comprobanteURL;
+    }
+    
+    await updateDoc(depositoRef, updateData);
+
+    return { success: true };
+};
+
+// ============================================
+// CUENTAS POR PAGAR
+// ============================================
+
+/**
+ * Crea una factura de proveedor (cuenta por pagar)
+ */
+export const createFacturaProveedor = async (facturaData) => {
+    const {
+        fecha,
+        sucursalId,
+        sucursalName,
+        proveedor,
+        numeroFactura,
+        descripcion,
+        monto,
+        moneda,
+        cuentaGastoId,
+        cuentaGastoCode,
+        cuentaGastoName,
+        fechaVencimiento,
+        userId,
+        userEmail
+    } = facturaData;
+
+    // Buscar cuenta de proveedores
+    const proveedoresAccount = await getCuentaByCode(CUENTAS_DGI.PROVEEDORES);
+    const facturaRef = doc(collection(db, 'facturasProveedor'));
+    
+    if (!proveedoresAccount) {
+        throw new Error('No se encontró la cuenta de Proveedores (210101). Cargue el Plan DGI primero.');
+    }
+
+    // Buscar cuenta de gasto
+    const gastoAccount = cuentaGastoId ? 
+        await getDoc(doc(db, 'planCuentas', cuentaGastoId)) : null;
+    
+    const gastoData = gastoAccount?.exists() ? 
+        { id: gastoAccount.id, ...gastoAccount.data() } : null;
+
+    if (!gastoData) {
+        throw new Error('No se encontro la cuenta de gasto para la factura del proveedor');
+    }
+
+    // Crear movimientos
+    const movimientos = [];
+    
+    if (gastoData) {
+        // Débito al gasto
+        movimientos.push({
+            cuentaId: gastoData.id,
+            cuentaCode: gastoData.code,
+            cuentaName: gastoData.name,
+            tipo: 'DEBITO',
+            monto,
+            montoUSD: moneda === 'USD' ? monto : 0,
+            descripcion: `Compra a crédito: ${descripcion}`
+        });
+    }
+    
+    // Crédito a proveedores
+    movimientos.push({
+        cuentaId: proveedoresAccount.id,
+        cuentaCode: proveedoresAccount.code,
+        cuentaName: proveedoresAccount.name,
+        tipo: 'CREDITO',
+        monto,
+        montoUSD: moneda === 'USD' ? monto : 0,
+        descripcion: `Por pagar a ${proveedor} - Factura ${numeroFactura}`
+    });
+
+    // Registrar asiento
+    const entry = await registerAccountingEntry({
+        fecha,
+        descripcion: `Factura ${numeroFactura} - ${proveedor}`,
+        referencia: numeroFactura,
+        documentoId: facturaRef.id,
+        documentoTipo: DOCUMENT_TYPES.FACTURA_PROVEEDOR,
+        moduloOrigen: 'cuentas-pagar',
+        userId,
+        userEmail,
+        movimientos,
+        metadata: { proveedor, numeroFactura, fechaVencimiento }
+    });
+
+    // Crear la factura
+    const factura = {
+        documentoId: facturaRef.id,
+        fecha,
+        sucursalId,
+        sucursalName,
+        proveedor,
+        numeroFactura,
+        descripcion,
+        monto,
+        moneda,
+        saldoPendiente: monto,
+        cuentaGastoId,
+        cuentaGastoCode,
+        cuentaGastoName,
+        fechaVencimiento,
+        estado: 'pendiente',
+        pagos: [],
+        movimientosContablesIds: entry.movimientos.map(m => m.id),
+        asientoId: entry.asientoId,
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail
+    };
+
+    await setDoc(facturaRef, factura);
+    return { id: facturaRef.id, ...factura };
+};
+
+/**
+ * Registra un pago a proveedor
+ */
+export const registrarPagoProveedor = async (facturaId, pagoData) => {
+    const {
+        fecha,
+        monto,
+        metodoPago,
+        bancoId,
+        bancoCode,
+        bancoName,
+        referencia,
+        comentarios,
+        userId,
+        userEmail
+    } = pagoData;
+
+    // Obtener la factura
+    const facturaRef = doc(db, 'facturasProveedor', facturaId);
+    const facturaSnap = await getDoc(facturaRef);
+    
+    if (!facturaSnap.exists()) {
+        throw new Error('Factura no encontrada');
+    }
+    
+    const factura = facturaSnap.data();
+    const pagoRef = doc(collection(db, 'pagosProveedor'));
+
+    // Buscar cuentas
+    const proveedoresAccount = await getCuentaByCode(CUENTAS_DGI.PROVEEDORES);
+    
+    let cuentaPago = null;
+    if (metodoPago === 'efectivo') {
+        cuentaPago = await getCuentaByCode(CUENTAS_DGI.CAJA_GENERAL);
+    } else if (bancoId) {
+        const bancoSnap = await getDoc(doc(db, 'planCuentas', bancoId));
+        if (bancoSnap.exists()) {
+            cuentaPago = { id: bancoSnap.id, ...bancoSnap.data() };
+        }
+    }
+
+    if (!proveedoresAccount) {
+        throw new Error('No se encontró la cuenta de Proveedores');
+    }
+    
+    if (!cuentaPago) {
+        throw new Error('No se encontró la cuenta de pago');
+    }
+
+    // Crear movimientos
+    const movimientos = [
+        {
+            cuentaId: proveedoresAccount.id,
+            cuentaCode: proveedoresAccount.code,
+            cuentaName: proveedoresAccount.name,
+            tipo: 'DEBITO',
+            monto,
+            montoUSD: factura.moneda === 'USD' ? monto : 0,
+            descripcion: `Pago a ${factura.proveedor} - Factura ${factura.numeroFactura}`
+        },
+        {
+            cuentaId: cuentaPago.id,
+            cuentaCode: cuentaPago.code,
+            cuentaName: cuentaPago.name,
+            tipo: 'CREDITO',
+            monto,
+            montoUSD: factura.moneda === 'USD' ? monto : 0,
+            descripcion: `Pago factura ${factura.numeroFactura}`
+        }
+    ];
+
+    // Registrar asiento
+    const entry = await registerAccountingEntry({
+        fecha,
+        descripcion: `Pago Factura ${factura.numeroFactura} - ${factura.proveedor}`,
+        referencia,
+        documentoId: pagoRef.id,
+        documentoTipo: DOCUMENT_TYPES.PAGO_PROVEEDOR,
+        moduloOrigen: 'cuentas-pagar',
+        userId,
+        userEmail,
+        movimientos,
+        metadata: { facturaId, proveedor: factura.proveedor, monto }
+    });
+
+    // Actualizar factura
+    const nuevoSaldo = factura.saldoPendiente - monto;
+    const nuevoEstado = nuevoSaldo <= 0.01 ? 'pagada' : 'parcial';
+
+    await setDoc(pagoRef, {
+        documentoId: pagoRef.id,
+        facturaId,
+        proveedor: factura.proveedor,
+        numeroFactura: factura.numeroFactura,
+        fecha,
+        monto,
+        metodoPago,
+        bancoId,
+        bancoCode,
+        bancoName,
+        referencia,
+        comentarios,
+        asientoId: entry.asientoId,
+        movimientosContablesIds: entry.movimientos.map((mov) => mov.id),
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail
+    });
+
+    await updateDoc(facturaRef, {
+        saldoPendiente: nuevoSaldo,
+        estado: nuevoEstado,
+        pagos: [...(factura.pagos || []), {
+            id: pagoRef.id,
+            fecha,
+            monto,
+            metodoPago,
+            bancoId,
+            bancoCode,
+            bancoName,
+            referencia,
+            comentarios,
+            asientoId: entry.asientoId,
+            movimientosContablesIds: entry.movimientos.map((mov) => mov.id),
+            createdAt: Timestamp.now()
+        }],
+        updatedAt: Timestamp.now()
+    });
+
+    return { success: true, pagoId: pagoRef.id, nuevoSaldo, estado: nuevoEstado };
+};
+
+// ============================================
+// AJUSTES MANUALES
+// ============================================
+
+/**
+ * Crea un ajuste manual pendiente de aprobación
+ */
+export const createAjusteManual = async (ajusteData) => {
+    const {
+        fecha,
+        cuentaId,
+        cuentaCode,
+        cuentaName,
+        tipoMovimiento,
+        monto,
+        descripcion,
+        justificacion,
+        userId,
+        userEmail
+    } = ajusteData;
+
+    const ajuste = {
+        fecha,
+        cuentaId,
+        cuentaCode,
+        cuentaName,
+        tipoMovimiento,
+        monto: Number(monto),
+        descripcion,
+        justificacion,
+        estado: 'pendiente',
+        aprobadoPor: null,
+        aprobadoPorEmail: null,
+        aprobadoAt: null,
+        rechazadoPor: null,
+        rechazadoPorEmail: null,
+        rechazadoAt: null,
+        motivoRechazo: null,
+        movimientosContablesIds: [],
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail
+    };
+
+    const docRef = await addDoc(collection(db, 'ajustesManuales'), ajuste);
+    return { id: docRef.id, ...ajuste };
+};
+
+/**
+ * Aprueba un ajuste manual y genera los movimientos contables
+ */
+export const aprobarAjusteManual = async (ajusteId, userId, userEmail) => {
+    const ajusteRef = doc(db, 'ajustesManuales', ajusteId);
+    const ajusteSnap = await getDoc(ajusteRef);
+
+    if (!ajusteSnap.exists()) {
+        throw new Error('Ajuste no encontrado');
+    }
+
+    const ajuste = ajusteSnap.data();
+
+    if (ajuste.estado !== 'pendiente') {
+        throw new Error('El ajuste ya fue procesado');
+    }
+
+    if (toNumber(ajuste.monto) <= 0) {
+        throw new Error('El ajuste manual debe tener un monto mayor a cero');
+    }
+
+    // Buscar cuenta contrapartida (Gastos Extraordinarios para ajustes)
+    const gastosExtraAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+    const cuentaAjuste = await getDoc(doc(db, 'planCuentas', ajuste.cuentaId));
+
+    if (!cuentaAjuste.exists()) {
+        throw new Error('Cuenta del ajuste no encontrada');
+    }
+
+    if (!gastosExtraAccount) {
+        throw new Error('No se encontro la cuenta 610302 - Gastos Extraordinarios para aprobar el ajuste manual');
+    }
+
+    const cuentaData = { id: cuentaAjuste.id, ...cuentaAjuste.data() };
+
+    // Crear movimientos
+    const movimientos = [];
+
+    if (ajuste.tipoMovimiento === 'DEBITO') {
+        // Débito a la cuenta ajustada, crédito a gastos extraordinarios
+        movimientos.push({
+            cuentaId: cuentaData.id,
+            cuentaCode: cuentaData.code,
+            cuentaName: cuentaData.name,
+            tipo: 'DEBITO',
+            monto: ajuste.monto,
+            montoUSD: 0,
+            descripcion: ajuste.descripcion
+        });
+
+        if (gastosExtraAccount) {
+            movimientos.push({
+                cuentaId: gastosExtraAccount.id,
+                cuentaCode: gastosExtraAccount.code,
+                cuentaName: gastosExtraAccount.name,
+                tipo: 'CREDITO',
+                monto: ajuste.monto,
+                montoUSD: 0,
+                descripcion: `Contrapartida ajuste: ${ajuste.descripcion}`
+            });
+        }
+    } else {
+        // Crédito a la cuenta ajustada, débito a gastos extraordinarios
+        if (gastosExtraAccount) {
+            movimientos.push({
+                cuentaId: gastosExtraAccount.id,
+                cuentaCode: gastosExtraAccount.code,
+                cuentaName: gastosExtraAccount.name,
+                tipo: 'DEBITO',
+                monto: ajuste.monto,
+                montoUSD: 0,
+                descripcion: `Contrapartida ajuste: ${ajuste.descripcion}`
+            });
+        }
+
+        movimientos.push({
+            cuentaId: cuentaData.id,
+            cuentaCode: cuentaData.code,
+            cuentaName: cuentaData.name,
+            tipo: 'CREDITO',
+            monto: ajuste.monto,
+            montoUSD: 0,
+            descripcion: ajuste.descripcion
+        });
+    }
+
+    // Registrar asiento contable
+    const entry = await registerAccountingEntry({
+        fecha: ajuste.fecha,
+        descripcion: `Ajuste Manual: ${ajuste.descripcion}`,
+        referencia: `AJUSTE-${ajusteId}`,
+        documentoId: ajusteId,
+        documentoTipo: DOCUMENT_TYPES.AJUSTE,
+        moduloOrigen: 'ajusteManual',
+        userId,
+        userEmail: userEmail || ajuste.createdByEmail || null,
+        movimientos,
+        metadata: { 
+            tipo: 'ajusteManual',
+            cuentaAjustada: cuentaData.name,
+            tipoMovimiento: ajuste.tipoMovimiento
+        }
+    });
+
+    // Actualizar ajuste
+    const updatePayload = {
+        estado: 'aprobado',
+        aprobadoPor: userId,
+        aprobadoAt: Timestamp.now(),
+        movimientosContablesIds: entry.movimientos.map(m => m.id),
+        asientoId: entry.asientoId
+    };
+
+    if (userEmail || ajuste.createdByEmail) {
+        updatePayload.aprobadoPorEmail = userEmail || ajuste.createdByEmail;
+    }
+
+    await updateDoc(ajusteRef, updatePayload);
+
+    return { success: true };
+};
+
+/**
+ * Rechaza un ajuste manual
+ */
+export const rechazarAjusteManual = async (ajusteId, motivo, userId, userEmail) => {
+    const ajusteRef = doc(db, 'ajustesManuales', ajusteId);
+    const ajusteSnap = await getDoc(ajusteRef);
+
+    if (!ajusteSnap.exists()) {
+        throw new Error('Ajuste no encontrado');
+    }
+
+    const ajuste = ajusteSnap.data();
+
+    if (ajuste.estado !== 'pendiente') {
+        throw new Error('El ajuste ya fue procesado');
+    }
+
+    const updatePayload = {
+        estado: 'rechazado',
+        rechazadoPor: userId,
+        rechazadoAt: Timestamp.now(),
+        motivoRechazo: motivo
+    };
+
+    if (userEmail || ajuste.createdByEmail) {
+        updatePayload.rechazadoPorEmail = userEmail || ajuste.createdByEmail;
+    }
+
+    await updateDoc(ajusteRef, updatePayload);
+
+    return { success: true };
+};
+
+/**
+ * Reinicia los datos operativos del ERP manteniendo la configuración base.
+ * Conserva usuarios, sucursales, configuración y estructura del plan de cuentas.
+ * Los saldos contables vuelven a cero.
+ */
+export const resetERPDatabase = async ({ userId, userEmail, reason = 'manual-reset' }) => {
+    if (!userId) {
+        throw new Error('Debe iniciar sesión para reiniciar la base de datos');
+    }
+
+    const usuarioSnap = await getDoc(doc(db, 'usuarios', userId));
+    if (!usuarioSnap.exists() || usuarioSnap.data()?.role !== 'admin') {
+        throw new Error('Solo un administrador puede reiniciar la base de datos');
+    }
+
+    const collectionsToClear = [
+        'ventasDirectas',
+        'gastosDirectos',
+        'compras',
+        'gastosDiarios',
+        'proveedores',
+        'facturasProveedor',
+        'facturasCuentaPagar',
+        'pagosProveedor',
+        'abonosProveedor',
+        'abonosFacturaDetalle',
+        'depositosTransito',
+        'depositosBancarios',
+        'cierresCajaERP',
+        'ajustesManuales',
+        'asientosContables',
+        'movimientosContables'
+    ];
+
+    const collectionsReset = {};
+
+    for (const collectionName of collectionsToClear) {
+        collectionsReset[collectionName] = await deleteCollectionDocuments(collectionName);
+    }
+
+    const planCuentasReset = await resetPlanCuentasBalances();
+    const executedAt = Timestamp.now();
+
+    await setDoc(
+        doc(db, 'configuracion', 'ultimoReinicioSistema'),
+        {
+            executedAt,
+            executedBy: userId,
+            executedByEmail: userEmail || null,
+            reason,
+            collectionsReset,
+            planCuentasReset,
+            preservedCollections: ['usuarios', 'branches', 'configuracion', 'planCuentas']
+        },
+        { merge: true }
+    );
+
+    return {
+        success: true,
+        executedAt,
+        collectionsReset,
+        planCuentasReset,
+        preservedCollections: ['usuarios', 'branches', 'configuracion', 'planCuentas']
+    };
+};
+
+export default {
+    DOCUMENT_TYPES,
+    registerAccountingEntry,
+    createCierreCajaERP,
+    updateCierreCajaERPStatus,
+    procesarCierreCajaERP,
+    createDepositoTransitoERP,
+    confirmarDepositoBancarioERP,
+    createFacturaProveedor,
+    registrarPagoProveedor,
+    createAjusteManual,
+    aprobarAjusteManual,
+    rechazarAjusteManual,
+    resetERPDatabase
+};

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test ERP - Diagnóstico</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #f0f0f0; }
+        .box { background: white; padding: 20px; margin: 10px 0; border-radius: 8px; }
+        .error { color: red; background: #fee; }
+        .success { color: green; background: #efe; }
+        .warning { color: orange; background: #ffe; }
+        pre { background: #f5f5f5; padding: 10px; overflow-x: auto; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>🔧 Diagnóstico ERP</h1>
+    
+    <div class="box">
+        <h2>Estado de la Aplicación</h2>
+        <div id="status">Verificando...</div>
+    </div>
+
+    <div class="box">
+        <h2>Errores de Consola</h2>
+        <p>Abre F12 → Console y verifica si hay errores en ROJO</p>
+        <div id="console-errors"></div>
+    </div>
+
+    <div class="box">
+        <h2>Pruebas</h2>
+        <button onclick="testLogin()">Ir a Login</button>
+        <button onclick="testInicio()">Ir a Inicio</button>
+        <button onclick="location.reload()">Recargar</button>
+    </div>
+
+    <div class="box">
+        <h2>Soluciones Rápidas</h2>
+        <ol>
+            <li><strong>Limpiar caché:</strong> Ctrl+Shift+R (hard refresh)</li>
+            <li><strong>Reinstalar dependencias:</strong>
+                <pre>rm -rf node_modules
+npm install
+npm run dev</pre>
+            </li>
+            <li><strong>Verificar Firebase:</strong> Asegúrate de que el proyecto exista en console.firebase.google.com</li>
+        </ol>
+    </div>
+
+    <script>
+        // Capturar errores
+        const errors = [];
+        window.onerror = function(msg, url, line) {
+            errors.push({ msg, url, line });
+            updateStatus();
+            return false;
+        };
+
+        window.addEventListener('error', function(e) {
+            errors.push({ msg: e.message, type: 'event' });
+            updateStatus();
+        });
+
+        function updateStatus() {
+            const status = document.getElementById('status');
+            const consoleErrors = document.getElementById('console-errors');
+            
+            if (errors.length === 0) {
+                status.innerHTML = '<p class="success">✅ No se detectaron errores de JavaScript</p>';
+            } else {
+                status.innerHTML = '<p class="error">❌ Se encontraron ' + errors.length + ' errores</p>';
+                consoleErrors.innerHTML = '<pre>' + JSON.stringify(errors, null, 2) + '</pre>';
+            }
+        }
+
+        function testLogin() {
+            window.location.href = '/login';
+        }
+
+        function testInicio() {
+            window.location.href = '/inicio';
+        }
+
+        // Verificar después de cargar
+        setTimeout(updateStatus, 1000);
+    </script>
+</body>
+</html>

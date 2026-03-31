@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diagnóstico ERP</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .box {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 { color: #333; }
+        h2 { color: #666; border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+        .success { color: green; }
+        .error { color: red; }
+        .warning { color: orange; }
+        pre {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #0055aa; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>🔧 Diagnóstico ERP Carnessanmartin</h1>
+        <p>Si ves esta página, el servidor está funcionando correctamente.</p>
+    </div>
+
+    <div class="box">
+        <h2>Verificación de JavaScript</h2>
+        <p id="js-status">Verificando...</p>
+    </div>
+
+    <div class="box">
+        <h2>Errores en Consola</h2>
+        <p>Abre la consola del navegador (F12) y verifica si hay errores.</p>
+        <p>Errores comunes:</p>
+        <ul>
+            <li><code>Cannot read properties of null</code> - Problema con datos nulos</li>
+            <li><code>Failed to load module</code> - Error de importación</li>
+            <li><code>Firebase Error</code> - Problema de conexión a Firebase</li>
+        </ul>
+    </div>
+
+    <div class="box">
+        <h2>Pasos para solucionar</h2>
+        <ol>
+            <li>Abre la consola del navegador (F12)</li>
+            <li>Ve a la pestaña "Console"</li>
+            <li>Busca mensajes de error en rojo</li>
+            <li>Toma una captura de pantalla de los errores</li>
+        </ol>
+    </div>
+
+    <div class="box">
+        <h2>Verificación de Dependencias</h2>
+        <button onclick="verificarDeps()">Verificar package.json</button>
+        <div id="deps-result"></div>
+    </div>
+
+    <div class="box">
+        <h2>Enlaces de prueba</h2>
+        <ul>
+            <li><a href="/login">Login</a></li>
+            <li><a href="/inicio">Inicio</a></li>
+            <li><a href="/">Raíz (redirect)</a></li>
+        </ul>
+    </div>
+
+    <script>
+        // Verificar si JavaScript funciona
+        document.getElementById('js-status').innerHTML = 
+            '<span class="success">✓ JavaScript está funcionando correctamente</span>';
+
+        function verificarDeps() {
+            fetch('/package.json')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('deps-result').innerHTML = 
+                        '<pre>' + JSON.stringify(data.dependencies, null, 2) + '</pre>';
+                })
+                .catch(e => {
+                    document.getElementById('deps-result').innerHTML = 
+                        '<span class="error">Error: ' + e.message + '</span>';
+                });
+        }
+
+        // Capturar errores
+        window.onerror = function(msg, url, line) {
+            alert('Error encontrado:\n' + msg + '\n\nLínea: ' + line);
+            return false;
+        };
+    </script>
+</body>
+</html>
