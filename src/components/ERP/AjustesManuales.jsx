@@ -1,5 +1,5 @@
 // src/components/ERP/AjustesManuales.jsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useAuth } from '../../context/AuthContext';
@@ -11,12 +11,17 @@ import { Plus, CheckCircle, XCircle, RefreshCw, AlertCircle, DollarSign } from '
 const AjustesManuales = () => {
     const { user } = useAuth();
     const { accounts } = usePlanCuentas();
+    const cuentasDetalle = useMemo(
+        () => accounts.filter((account) => !account.isGroup),
+        [accounts]
+    );
     const [ajustes, setAjustes] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showModal, setShowModal] = useState(false);
     const [formData, setFormData] = useState({
         fecha: format(new Date(), 'yyyy-MM-dd'),
         cuentaId: '',
+        cuentaContrapartidaId: '',
         tipoMovimiento: 'DEBITO',
         monto: '',
         descripcion: '',
@@ -42,8 +47,18 @@ const AjustesManuales = () => {
     const handleSubmit = async (e) => {
         e.preventDefault();
         try {
-            const cuenta = accounts.find(a => a.id === formData.cuentaId);
-            if (!cuenta) return;
+            const cuenta = cuentasDetalle.find(a => a.id === formData.cuentaId);
+            const cuentaContrapartida = cuentasDetalle.find(a => a.id === formData.cuentaContrapartidaId);
+
+            if (!cuenta || !cuentaContrapartida) {
+                alert('Debe seleccionar ambas cuentas del ajuste');
+                return;
+            }
+
+            if (cuenta.id === cuentaContrapartida.id) {
+                alert('La cuenta ajustada y la contrapartida deben ser diferentes');
+                return;
+            }
 
             await createAjusteManual({
                 fecha: formData.fecha,
@@ -51,6 +66,9 @@ const AjustesManuales = () => {
                 cuentaId: formData.cuentaId,
                 cuentaCode: cuenta.code,
                 cuentaName: cuenta.name,
+                cuentaContrapartidaId: formData.cuentaContrapartidaId,
+                cuentaContrapartidaCode: cuentaContrapartida.code,
+                cuentaContrapartidaName: cuentaContrapartida.name,
                 tipoMovimiento: formData.tipoMovimiento,
                 monto: Number(formData.monto),
                 descripcion: formData.descripcion,
@@ -63,6 +81,7 @@ const AjustesManuales = () => {
             setFormData({
                 fecha: format(new Date(), 'yyyy-MM-dd'),
                 cuentaId: '',
+                cuentaContrapartidaId: '',
                 tipoMovimiento: 'DEBITO',
                 monto: '',
                 descripcion: '',
@@ -124,7 +143,8 @@ const AjustesManuales = () => {
                     <thead className="bg-gray-50">
                         <tr>
                             <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Fecha</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Cuenta</th>
+                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Cuenta Afectada</th>
+                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Contrapartida</th>
                             <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Tipo</th>
                             <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Monto</th>
                             <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Estado</th>
@@ -139,6 +159,11 @@ const AjustesManuales = () => {
                                     <span className="font-mono text-xs">{ajuste.cuentaCode}</span>
                                     <br />
                                     {ajuste.cuentaName}
+                                </td>
+                                <td className="px-4 py-3">
+                                    <span className="font-mono text-xs">{ajuste.cuentaContrapartidaCode || '610302'}</span>
+                                    <br />
+                                    {ajuste.cuentaContrapartidaName || 'Gastos Extraordinarios'}
                                 </td>
                                 <td className="px-4 py-3">
                                     <span className={`px-2 py-1 rounded-full text-xs ${
@@ -206,7 +231,7 @@ const AjustesManuales = () => {
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Cuenta</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Cuenta Afectada</label>
                                 <select
                                     value={formData.cuentaId}
                                     onChange={(e) => setFormData({ ...formData, cuentaId: e.target.value })}
@@ -214,13 +239,27 @@ const AjustesManuales = () => {
                                     required
                                 >
                                     <option value="">Seleccione una cuenta...</option>
-                                    {accounts.map(a => (
+                                    {cuentasDetalle.map(a => (
                                         <option key={a.id} value={a.id}>{a.code} - {a.name}</option>
                                     ))}
                                 </select>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Movimiento</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Cuenta Contrapartida</label>
+                                <select
+                                    value={formData.cuentaContrapartidaId}
+                                    onChange={(e) => setFormData({ ...formData, cuentaContrapartidaId: e.target.value })}
+                                    className="w-full px-3 py-2 border rounded-lg"
+                                    required
+                                >
+                                    <option value="">Seleccione una cuenta...</option>
+                                    {cuentasDetalle.map(a => (
+                                        <option key={a.id} value={a.id}>{a.code} - {a.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Tipo en Cuenta Afectada</label>
                                 <select
                                     value={formData.tipoMovimiento}
                                     onChange={(e) => setFormData({ ...formData, tipoMovimiento: e.target.value })}
@@ -229,6 +268,9 @@ const AjustesManuales = () => {
                                     <option value="DEBITO">Débito</option>
                                     <option value="CREDITO">Crédito</option>
                                 </select>
+                                <p className="text-xs text-gray-500 mt-1">
+                                    La contrapartida se registrará automáticamente en sentido opuesto.
+                                </p>
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Monto</label>

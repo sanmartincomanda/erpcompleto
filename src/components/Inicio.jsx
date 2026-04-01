@@ -11,7 +11,8 @@ import {
     BarChart3,
     Settings,
     TrendingUp,
-    TrendingDown
+    TrendingDown,
+    Package
 } from 'lucide-react';
 
 const Inicio = () => {
@@ -22,6 +23,13 @@ const Inicio = () => {
             icon: BookOpen,
             path: '/plan-cuentas',
             color: 'bg-blue-500'
+        },
+        {
+            title: 'Activos Fijos',
+            description: 'Registre compras de activos y depreciación',
+            icon: Package,
+            path: '/activos-fijos',
+            color: 'bg-amber-500'
         },
         {
             title: 'Ventas y Gastos',

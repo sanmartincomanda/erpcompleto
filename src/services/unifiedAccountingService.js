@@ -32,6 +32,8 @@ export const DOCUMENT_TYPES = {
     CONFIRMACION_DEPOSITO: 'confirmacionDeposito',
     FACTURA_PROVEEDOR: 'facturaProveedor',
     PAGO_PROVEEDOR: 'pagoProveedor',
+    ACTIVO_FIJO: 'activoFijo',
+    DEPRECIACION_ACTIVO_FIJO: 'depreciacionActivoFijo',
     GASTO: 'gasto',
     INGRESO: 'ingreso',
     DIFERENCIA_CAJA: 'diferenciaCaja',
@@ -51,6 +53,12 @@ const getCuentaByCode = async (code) => {
     const q = query(accountsRef, where('code', '==', code));
     const snap = await getDocs(q);
     return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+};
+
+const getCuentaById = async (id) => {
+    if (!id) return null;
+    const accountSnap = await getDoc(doc(db, 'planCuentas', id));
+    return accountSnap.exists() ? { id: accountSnap.id, ...accountSnap.data() } : null;
 };
 
 /**
@@ -159,6 +167,55 @@ const chunkItems = (items = [], chunkSize = FIRESTORE_BATCH_LIMIT) => {
     }
 
     return chunks;
+};
+
+const roundToTwo = (value) => Math.round((Number(value) || 0) * 100) / 100;
+
+const normalizePeriod = (value) => {
+    const normalized = String(value || '').trim();
+    const match = normalized.match(/^(\d{4})-(\d{2})$/);
+    return match ? `${match[1]}-${match[2]}` : '';
+};
+
+const getPeriodFromDate = (dateValue) => {
+    if (!dateValue) return '';
+    const stringValue = String(dateValue);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(stringValue)) {
+        return stringValue.slice(0, 7);
+    }
+
+    const parsed = new Date(stringValue);
+    if (Number.isNaN(parsed.getTime())) return '';
+
+    const month = String(parsed.getMonth() + 1).padStart(2, '0');
+    return `${parsed.getFullYear()}-${month}`;
+};
+
+const getLastDayOfPeriod = (period) => {
+    const normalized = normalizePeriod(period);
+    if (!normalized) return '';
+
+    const [yearString, monthString] = normalized.split('-');
+    const year = Number(yearString);
+    const monthIndex = Number(monthString) - 1;
+    const lastDay = new Date(year, monthIndex + 1, 0);
+
+    return [
+        lastDay.getFullYear(),
+        String(lastDay.getMonth() + 1).padStart(2, '0'),
+        String(lastDay.getDate()).padStart(2, '0')
+    ].join('-');
+};
+
+const isProveedorLiabilityAccount = (account = {}) => {
+    const normalizedCode = normalizeCode(account.code);
+    const normalizedName = String(account.name || '').toLowerCase();
+
+    return (
+        account.subType === 'proveedores' ||
+        normalizedCode === '210101' ||
+        normalizedName.includes('proveedor')
+    );
 };
 
 const deleteCollectionDocuments = async (collectionName) => {
@@ -1513,6 +1570,526 @@ export const registrarPagoProveedor = async (facturaId, pagoData) => {
 };
 
 // ============================================
+// ACTIVOS FIJOS
+// ============================================
+
+/**
+ * Registra un activo fijo y genera el asiento de adquisición.
+ * Si la compra es a crédito contra proveedores, también crea la factura en CxP.
+ */
+export const createActivoFijo = async (activoData) => {
+    const {
+        fechaAdquisicion,
+        fechaInicioDepreciacion,
+        sucursalId,
+        sucursalName,
+        nombre,
+        descripcion,
+        proveedorId = '',
+        proveedorNombre = '',
+        numeroDocumento = '',
+        fechaVencimiento = '',
+        moneda = 'NIO',
+        tipoCambio = 1,
+        costo,
+        valorResidual = 0,
+        vidaUtilMeses,
+        tipoAdquisicion = 'contado',
+        cuentaActivoId,
+        cuentaPagoId = '',
+        cuentaPasivoId = '',
+        cuentaDepreciacionGastoId,
+        cuentaDepreciacionAcumuladaId,
+        observaciones = '',
+        userId,
+        userEmail
+    } = activoData;
+
+    const costoBase = roundToTwo(costo);
+    const residualBase = roundToTwo(valorResidual);
+    const exchangeRate = Number(tipoCambio) || 1;
+    const usefulLifeMonths = Number(vidaUtilMeses) || 0;
+
+    if (!fechaAdquisicion) {
+        throw new Error('Debe indicar la fecha de adquisición del activo.');
+    }
+
+    if (!sucursalId) {
+        throw new Error('Debe seleccionar la sucursal del activo fijo.');
+    }
+
+    if (!nombre) {
+        throw new Error('Debe ingresar el nombre del activo fijo.');
+    }
+
+    if (!cuentaActivoId) {
+        throw new Error('Debe seleccionar la cuenta del activo fijo.');
+    }
+
+    if (costoBase <= 0) {
+        throw new Error('El costo del activo debe ser mayor a cero.');
+    }
+
+    if (residualBase < 0 || residualBase > costoBase) {
+        throw new Error('El valor residual debe ser menor o igual al costo del activo.');
+    }
+
+    if (usefulLifeMonths <= 0) {
+        throw new Error('La vida útil debe expresarse en meses y ser mayor a cero.');
+    }
+
+    const cuentaActivo = await getCuentaById(cuentaActivoId);
+    if (!cuentaActivo) {
+        throw new Error('No se encontró la cuenta del activo fijo.');
+    }
+
+    const cuentaContrapartida =
+        tipoAdquisicion === 'contado'
+            ? await getCuentaById(cuentaPagoId)
+            : await getCuentaById(cuentaPasivoId);
+
+    if (!cuentaContrapartida) {
+        throw new Error(
+            tipoAdquisicion === 'contado'
+                ? 'Debe seleccionar la cuenta de salida para registrar la compra.'
+                : 'Debe seleccionar la cuenta pasiva de la obligación.'
+        );
+    }
+
+    const cuentaDepreciacionGasto =
+        (await getCuentaById(cuentaDepreciacionGastoId)) ||
+        (await getCuentaByCode('610112'));
+
+    const cuentaDepreciacionAcumulada =
+        (await getCuentaById(cuentaDepreciacionAcumuladaId)) ||
+        (await getCuentaByCode('120199'));
+
+    if (!cuentaDepreciacionGasto) {
+        throw new Error('No se encontró la cuenta de gasto por depreciación.');
+    }
+
+    if (!cuentaDepreciacionAcumulada) {
+        throw new Error('No se encontró la cuenta de depreciación acumulada.');
+    }
+
+    const costoNIO = moneda === 'USD' ? roundToTwo(costoBase * exchangeRate) : costoBase;
+    const costoUSD = moneda === 'USD' ? costoBase : 0;
+    const residualNIO = moneda === 'USD' ? roundToTwo(residualBase * exchangeRate) : residualBase;
+    const residualUSD = moneda === 'USD' ? residualBase : 0;
+    const baseDepreciableNIO = roundToTwo(costoNIO - residualNIO);
+    const baseDepreciableUSD = roundToTwo(costoUSD - residualUSD);
+    const depreciacionMensual = roundToTwo(baseDepreciableNIO / usefulLifeMonths);
+    const depreciacionMensualUSD = moneda === 'USD'
+        ? roundToTwo(baseDepreciableUSD / usefulLifeMonths)
+        : 0;
+
+    const activoRef = doc(collection(db, 'activosFijos'));
+    const referenciaActivo = numeroDocumento || `AF-${activoRef.id.slice(0, 8).toUpperCase()}`;
+
+    const acquisitionEntry = await registerAccountingEntry({
+        fecha: fechaAdquisicion,
+        descripcion: `Adquisición activo fijo: ${nombre}`,
+        referencia: referenciaActivo,
+        documentoId: activoRef.id,
+        documentoTipo: DOCUMENT_TYPES.ACTIVO_FIJO,
+        moduloOrigen: 'activosFijos',
+        sucursalId,
+        sucursalName,
+        userId,
+        userEmail,
+        movimientos: [
+            {
+                cuentaId: cuentaActivo.id,
+                cuentaCode: cuentaActivo.code,
+                cuentaName: cuentaActivo.name,
+                tipo: 'DEBITO',
+                monto: costoNIO,
+                montoUSD: costoUSD,
+                descripcion: `Registro del activo fijo ${nombre}`
+            },
+            {
+                cuentaId: cuentaContrapartida.id,
+                cuentaCode: cuentaContrapartida.code,
+                cuentaName: cuentaContrapartida.name,
+                tipo: 'CREDITO',
+                monto: costoNIO,
+                montoUSD: costoUSD,
+                descripcion:
+                    tipoAdquisicion === 'contado'
+                        ? `Salida por compra de activo fijo ${nombre}`
+                        : `Obligación por compra de activo fijo ${nombre}`
+            }
+        ],
+        metadata: {
+            activoFijoId: activoRef.id,
+            activoFijoNombre: nombre,
+            tipoAdquisicion,
+            proveedorId,
+            proveedorNombre,
+            moneda,
+            tipoCambio: exchangeRate,
+            sucursalId,
+            sucursalName
+        }
+    });
+
+    let facturaProveedorId = null;
+
+    if (tipoAdquisicion === 'credito' && isProveedorLiabilityAccount(cuentaContrapartida)) {
+        const facturaProveedorRef = doc(collection(db, 'facturasProveedor'));
+        await setDoc(facturaProveedorRef, {
+            documentoId: facturaProveedorRef.id,
+            origenModulo: 'activosFijos',
+            activoFijoId: activoRef.id,
+            proveedorId,
+            proveedorNombre: proveedorNombre || cuentaContrapartida.name,
+            proveedorCodigo: '',
+            sucursalId,
+            sucursalName,
+            numeroFactura: numeroDocumento || referenciaActivo,
+            fechaEmision: fechaAdquisicion,
+            fechaVencimiento: fechaVencimiento || fechaAdquisicion,
+            monto: costoNIO,
+            montoUSD: costoUSD,
+            moneda,
+            saldoPendiente: costoNIO,
+            montoAbonado: 0,
+            descripcion: `Activo fijo: ${nombre}`,
+            cuentaGastoId: cuentaActivo.id,
+            cuentaGastoCode: cuentaActivo.code,
+            cuentaGastoName: cuentaActivo.name,
+            cuentaProveedorId: cuentaContrapartida.id,
+            cuentaProveedorCode: cuentaContrapartida.code,
+            cuentaProveedorName: cuentaContrapartida.name,
+            estado: 'pendiente',
+            asientoId: acquisitionEntry.asientoId,
+            movimientosContablesIds: acquisitionEntry.movimientos.map((mov) => mov.id),
+            createdAt: Timestamp.now(),
+            createdBy: userId,
+            createdByEmail: userEmail
+        });
+        facturaProveedorId = facturaProveedorRef.id;
+    }
+
+    const activo = {
+        documentoId: activoRef.id,
+        fechaAdquisicion,
+        fechaInicioDepreciacion: fechaInicioDepreciacion || fechaAdquisicion,
+        sucursalId,
+        sucursalName,
+        nombre,
+        descripcion,
+        proveedorId,
+        proveedorNombre,
+        numeroDocumento: numeroDocumento || referenciaActivo,
+        fechaVencimiento: fechaVencimiento || null,
+        moneda,
+        tipoCambio: exchangeRate,
+        costoOriginal: costoNIO,
+        costoOriginalUSD: costoUSD,
+        valorResidual: residualNIO,
+        valorResidualUSD: residualUSD,
+        baseDepreciable: baseDepreciableNIO,
+        baseDepreciableUSD,
+        vidaUtilMeses: usefulLifeMonths,
+        depreciacionMensual,
+        depreciacionMensualUSD,
+        depreciacionAcumulada: 0,
+        depreciacionAcumuladaUSD: 0,
+        valorEnLibros: costoNIO,
+        valorEnLibrosUSD: costoUSD,
+        mesesDepreciados: 0,
+        mesesRestantes: usefulLifeMonths,
+        ultimoPeriodoDepreciado: null,
+        fechaUltimaDepreciacion: null,
+        estado: 'activo',
+        tipoAdquisicion,
+        cuentaActivoId: cuentaActivo.id,
+        cuentaActivoCode: cuentaActivo.code,
+        cuentaActivoName: cuentaActivo.name,
+        cuentaContrapartidaId: cuentaContrapartida.id,
+        cuentaContrapartidaCode: cuentaContrapartida.code,
+        cuentaContrapartidaName: cuentaContrapartida.name,
+        cuentaDepreciacionGastoId: cuentaDepreciacionGasto.id,
+        cuentaDepreciacionGastoCode: cuentaDepreciacionGasto.code,
+        cuentaDepreciacionGastoName: cuentaDepreciacionGasto.name,
+        cuentaDepreciacionAcumuladaId: cuentaDepreciacionAcumulada.id,
+        cuentaDepreciacionAcumuladaCode: cuentaDepreciacionAcumulada.code,
+        cuentaDepreciacionAcumuladaName: cuentaDepreciacionAcumulada.name,
+        asientoAdquisicionId: acquisitionEntry.asientoId,
+        movimientosAdquisicionIds: acquisitionEntry.movimientos.map((mov) => mov.id),
+        facturaProveedorId,
+        observaciones,
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail,
+        updatedAt: Timestamp.now()
+    };
+
+    await setDoc(activoRef, activo);
+
+    return {
+        id: activoRef.id,
+        ...activo,
+        facturaProveedorId
+    };
+};
+
+/**
+ * Genera la depreciación mensual de un activo fijo para un periodo específico.
+ */
+export const generarDepreciacionActivoFijo = async (assetId, depreciationData = {}) => {
+    const {
+        periodo,
+        fechaContable,
+        userId,
+        userEmail
+    } = depreciationData;
+
+    const activoRef = doc(db, 'activosFijos', assetId);
+    const activoSnap = await getDoc(activoRef);
+
+    if (!activoSnap.exists()) {
+        throw new Error('Activo fijo no encontrado.');
+    }
+
+    const activo = { id: activoSnap.id, ...activoSnap.data() };
+    const periodoDepreciacion =
+        normalizePeriod(periodo) ||
+        normalizePeriod(getPeriodFromDate(fechaContable)) ||
+        normalizePeriod(getPeriodFromDate(new Date().toISOString()));
+
+    if (!periodoDepreciacion) {
+        throw new Error('Debe indicar un periodo válido para la depreciación.');
+    }
+
+    const periodoInicio = normalizePeriod(getPeriodFromDate(activo.fechaInicioDepreciacion || activo.fechaAdquisicion));
+    if (periodoInicio && periodoDepreciacion < periodoInicio) {
+        throw new Error('El periodo es anterior al inicio de depreciación del activo.');
+    }
+
+    const depreciationRef = doc(db, 'depreciacionesActivosFijos', `${assetId}_${periodoDepreciacion}`);
+    const depreciationSnap = await getDoc(depreciationRef);
+    if (depreciationSnap.exists()) {
+        throw new Error(`La depreciación del periodo ${periodoDepreciacion} ya fue registrada.`);
+    }
+
+    const mesesDepreciados = Number(activo.mesesDepreciados || 0);
+    const vidaUtilMeses = Number(activo.vidaUtilMeses || 0);
+
+    if (mesesDepreciados >= vidaUtilMeses) {
+        throw new Error('El activo ya completó su depreciación.');
+    }
+
+    const restanteNIO = roundToTwo((activo.baseDepreciable || 0) - (activo.depreciacionAcumulada || 0));
+    const restanteUSD = roundToTwo((activo.baseDepreciableUSD || 0) - (activo.depreciacionAcumuladaUSD || 0));
+
+    if (restanteNIO <= 0 && restanteUSD <= 0) {
+        throw new Error('El activo ya no tiene base depreciable pendiente.');
+    }
+
+    const remainingMonths = Math.max(vidaUtilMeses - mesesDepreciados, 1);
+    const montoDepreciacion = remainingMonths === 1
+        ? restanteNIO
+        : Math.min(roundToTwo(activo.depreciacionMensual || 0), restanteNIO);
+    const montoDepreciacionUSD = remainingMonths === 1
+        ? restanteUSD
+        : Math.min(roundToTwo(activo.depreciacionMensualUSD || 0), restanteUSD);
+
+    if (montoDepreciacion <= 0 && montoDepreciacionUSD <= 0) {
+        throw new Error('No hay monto pendiente para depreciar en este activo.');
+    }
+
+    const cuentaGastoDepreciacion =
+        (await getCuentaById(activo.cuentaDepreciacionGastoId)) ||
+        (await getCuentaByCode('610112'));
+    const cuentaDepreciacionAcumulada =
+        (await getCuentaById(activo.cuentaDepreciacionAcumuladaId)) ||
+        (await getCuentaByCode('120199'));
+
+    if (!cuentaGastoDepreciacion || !cuentaDepreciacionAcumulada) {
+        throw new Error('No se encontraron las cuentas contables para registrar la depreciación.');
+    }
+
+    const fechaRegistro = fechaContable || getLastDayOfPeriod(periodoDepreciacion);
+    const referencia = `DEP-${periodoDepreciacion}-${assetId.slice(0, 6).toUpperCase()}`;
+
+    const entry = await registerAccountingEntry({
+        fecha: fechaRegistro,
+        descripcion: `Depreciación ${periodoDepreciacion} - ${activo.nombre}`,
+        referencia,
+        documentoId: depreciationRef.id,
+        documentoTipo: DOCUMENT_TYPES.DEPRECIACION_ACTIVO_FIJO,
+        moduloOrigen: 'activosFijos',
+        sucursalId: activo.sucursalId || null,
+        sucursalName: activo.sucursalName || null,
+        userId,
+        userEmail,
+        movimientos: [
+            {
+                cuentaId: cuentaGastoDepreciacion.id,
+                cuentaCode: cuentaGastoDepreciacion.code,
+                cuentaName: cuentaGastoDepreciacion.name,
+                tipo: 'DEBITO',
+                monto: montoDepreciacion,
+                montoUSD: montoDepreciacionUSD,
+                descripcion: `Gasto por depreciación ${activo.nombre}`
+            },
+            {
+                cuentaId: cuentaDepreciacionAcumulada.id,
+                cuentaCode: cuentaDepreciacionAcumulada.code,
+                cuentaName: cuentaDepreciacionAcumulada.name,
+                tipo: 'CREDITO',
+                monto: montoDepreciacion,
+                montoUSD: montoDepreciacionUSD,
+                descripcion: `Depreciación acumulada ${activo.nombre}`
+            }
+        ],
+        metadata: {
+            activoFijoId: activo.id,
+            activoFijoNombre: activo.nombre,
+            periodoDepreciacion,
+            sucursalId: activo.sucursalId || null,
+            sucursalName: activo.sucursalName || null
+        }
+    });
+
+    const nuevaDepreciacionAcumulada = roundToTwo((activo.depreciacionAcumulada || 0) + montoDepreciacion);
+    const nuevaDepreciacionAcumuladaUSD = roundToTwo((activo.depreciacionAcumuladaUSD || 0) + montoDepreciacionUSD);
+    const nuevoValorEnLibros = roundToTwo((activo.costoOriginal || 0) - nuevaDepreciacionAcumulada);
+    const nuevoValorEnLibrosUSD = roundToTwo((activo.costoOriginalUSD || 0) - nuevaDepreciacionAcumuladaUSD);
+    const nuevosMesesDepreciados = mesesDepreciados + 1;
+    const nuevosMesesRestantes = Math.max(vidaUtilMeses - nuevosMesesDepreciados, 0);
+
+    await setDoc(depreciationRef, {
+        documentoId: depreciationRef.id,
+        activoFijoId: activo.id,
+        activoFijoNombre: activo.nombre,
+        sucursalId: activo.sucursalId || null,
+        sucursalName: activo.sucursalName || null,
+        periodo: periodoDepreciacion,
+        fechaContable: fechaRegistro,
+        monto: montoDepreciacion,
+        montoUSD: montoDepreciacionUSD,
+        cuentaGastoId: cuentaGastoDepreciacion.id,
+        cuentaGastoCode: cuentaGastoDepreciacion.code,
+        cuentaGastoName: cuentaGastoDepreciacion.name,
+        cuentaDepreciacionAcumuladaId: cuentaDepreciacionAcumulada.id,
+        cuentaDepreciacionAcumuladaCode: cuentaDepreciacionAcumulada.code,
+        cuentaDepreciacionAcumuladaName: cuentaDepreciacionAcumulada.name,
+        asientoId: entry.asientoId,
+        movimientosContablesIds: entry.movimientos.map((mov) => mov.id),
+        createdAt: Timestamp.now(),
+        createdBy: userId,
+        createdByEmail: userEmail
+    });
+
+    await updateDoc(activoRef, {
+        depreciacionAcumulada: nuevaDepreciacionAcumulada,
+        depreciacionAcumuladaUSD: nuevaDepreciacionAcumuladaUSD,
+        valorEnLibros: nuevoValorEnLibros,
+        valorEnLibrosUSD: nuevoValorEnLibrosUSD,
+        mesesDepreciados: nuevosMesesDepreciados,
+        mesesRestantes: nuevosMesesRestantes,
+        ultimoPeriodoDepreciado: periodoDepreciacion,
+        fechaUltimaDepreciacion: fechaRegistro,
+        estado: nuevosMesesRestantes === 0 ? 'depreciado' : 'activo',
+        updatedAt: Timestamp.now()
+    });
+
+    return {
+        success: true,
+        assetId,
+        periodo: periodoDepreciacion,
+        asientoId: entry.asientoId,
+        monto: montoDepreciacion
+    };
+};
+
+/**
+ * Genera la depreciación mensual para todos los activos elegibles del periodo.
+ */
+export const generarDepreciacionMensualActivos = async (generationData = {}) => {
+    const {
+        periodo,
+        fechaContable,
+        sucursalId = '',
+        userId,
+        userEmail
+    } = generationData;
+
+    const periodoDepreciacion =
+        normalizePeriod(periodo) ||
+        normalizePeriod(getPeriodFromDate(fechaContable)) ||
+        normalizePeriod(getPeriodFromDate(new Date().toISOString()));
+
+    if (!periodoDepreciacion) {
+        throw new Error('Debe seleccionar un periodo válido para depreciar.');
+    }
+
+    const activosSnap = await getDocs(collection(db, 'activosFijos'));
+    const activos = activosSnap.docs
+        .map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() }))
+        .filter((activo) => {
+            const periodoInicio = normalizePeriod(getPeriodFromDate(activo.fechaInicioDepreciacion || activo.fechaAdquisicion));
+            const basePendiente = roundToTwo((activo.baseDepreciable || 0) - (activo.depreciacionAcumulada || 0));
+            const sameSucursal = !sucursalId || activo.sucursalId === sucursalId;
+
+            return (
+                sameSucursal &&
+                periodoInicio &&
+                periodoInicio <= periodoDepreciacion &&
+                activo.estado !== 'inactivo' &&
+                Number(activo.mesesDepreciados || 0) < Number(activo.vidaUtilMeses || 0) &&
+                basePendiente > 0
+            );
+        });
+
+    const result = {
+        periodo: periodoDepreciacion,
+        procesados: [],
+        omitidos: [],
+        errores: []
+    };
+
+    for (const activo of activos) {
+        try {
+            const depreciationRef = doc(db, 'depreciacionesActivosFijos', `${activo.id}_${periodoDepreciacion}`);
+            const depreciationSnap = await getDoc(depreciationRef);
+
+            if (depreciationSnap.exists()) {
+                result.omitidos.push({
+                    assetId: activo.id,
+                    nombre: activo.nombre,
+                    motivo: 'Ya depreciado en este periodo'
+                });
+                continue;
+            }
+
+            await generarDepreciacionActivoFijo(activo.id, {
+                periodo: periodoDepreciacion,
+                fechaContable: fechaContable || getLastDayOfPeriod(periodoDepreciacion),
+                userId,
+                userEmail
+            });
+
+            result.procesados.push({
+                assetId: activo.id,
+                nombre: activo.nombre
+            });
+        } catch (error) {
+            result.errores.push({
+                assetId: activo.id,
+                nombre: activo.nombre,
+                error: error.message
+            });
+        }
+    }
+
+    return result;
+};
+
+// ============================================
 // AJUSTES MANUALES
 // ============================================
 
@@ -1525,6 +2102,9 @@ export const createAjusteManual = async (ajusteData) => {
         cuentaId,
         cuentaCode,
         cuentaName,
+        cuentaContrapartidaId,
+        cuentaContrapartidaCode,
+        cuentaContrapartidaName,
         tipoMovimiento,
         monto,
         descripcion,
@@ -1533,13 +2113,38 @@ export const createAjusteManual = async (ajusteData) => {
         userEmail
     } = ajusteData;
 
+    const montoNormalizado = Number(monto) || 0;
+
+    if (!cuentaId || !cuentaCode || !cuentaName) {
+        throw new Error('Debe seleccionar la cuenta que será ajustada.');
+    }
+
+    if (!cuentaContrapartidaId || !cuentaContrapartidaCode || !cuentaContrapartidaName) {
+        throw new Error('Debe seleccionar la cuenta contrapartida del ajuste.');
+    }
+
+    if (cuentaId === cuentaContrapartidaId) {
+        throw new Error('La cuenta ajustada y la contrapartida deben ser diferentes.');
+    }
+
+    if (!['DEBITO', 'CREDITO'].includes(tipoMovimiento)) {
+        throw new Error('El tipo de movimiento del ajuste no es válido.');
+    }
+
+    if (montoNormalizado <= 0) {
+        throw new Error('El ajuste manual debe tener un monto mayor a cero.');
+    }
+
     const ajuste = {
         fecha,
         cuentaId,
         cuentaCode,
         cuentaName,
+        cuentaContrapartidaId,
+        cuentaContrapartidaCode,
+        cuentaContrapartidaName,
         tipoMovimiento,
-        monto: Number(monto),
+        monto: montoNormalizado,
         descripcion,
         justificacion,
         estado: 'pendiente',
@@ -1581,25 +2186,34 @@ export const aprobarAjusteManual = async (ajusteId, userId, userEmail) => {
         throw new Error('El ajuste manual debe tener un monto mayor a cero');
     }
 
-    // Buscar cuenta contrapartida (Gastos Extraordinarios para ajustes)
-    const gastosExtraAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
     const cuentaAjuste = await getDoc(doc(db, 'planCuentas', ajuste.cuentaId));
+    const cuentaContrapartida = ajuste.cuentaContrapartidaId
+        ? await getDoc(doc(db, 'planCuentas', ajuste.cuentaContrapartidaId))
+        : null;
 
     if (!cuentaAjuste.exists()) {
         throw new Error('Cuenta del ajuste no encontrada');
     }
 
-    if (!gastosExtraAccount) {
-        throw new Error('No se encontro la cuenta 610302 - Gastos Extraordinarios para aprobar el ajuste manual');
+    const cuentaData = { id: cuentaAjuste.id, ...cuentaAjuste.data() };
+    const gastosExtraAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+    const cuentaContrapartidaData = cuentaContrapartida?.exists()
+        ? { id: cuentaContrapartida.id, ...cuentaContrapartida.data() }
+        : gastosExtraAccount;
+
+    if (!cuentaContrapartidaData) {
+        throw new Error('No se encontró la cuenta contrapartida del ajuste manual');
     }
 
-    const cuentaData = { id: cuentaAjuste.id, ...cuentaAjuste.data() };
+    if (cuentaData.id === cuentaContrapartidaData.id) {
+        throw new Error('La cuenta del ajuste y la contrapartida no pueden ser iguales');
+    }
 
     // Crear movimientos
     const movimientos = [];
+    const tipoContrapartida = ajuste.tipoMovimiento === 'DEBITO' ? 'CREDITO' : 'DEBITO';
 
     if (ajuste.tipoMovimiento === 'DEBITO') {
-        // Débito a la cuenta ajustada, crédito a gastos extraordinarios
         movimientos.push({
             cuentaId: cuentaData.id,
             cuentaCode: cuentaData.code,
@@ -1609,32 +2223,7 @@ export const aprobarAjusteManual = async (ajusteId, userId, userEmail) => {
             montoUSD: 0,
             descripcion: ajuste.descripcion
         });
-
-        if (gastosExtraAccount) {
-            movimientos.push({
-                cuentaId: gastosExtraAccount.id,
-                cuentaCode: gastosExtraAccount.code,
-                cuentaName: gastosExtraAccount.name,
-                tipo: 'CREDITO',
-                monto: ajuste.monto,
-                montoUSD: 0,
-                descripcion: `Contrapartida ajuste: ${ajuste.descripcion}`
-            });
-        }
     } else {
-        // Crédito a la cuenta ajustada, débito a gastos extraordinarios
-        if (gastosExtraAccount) {
-            movimientos.push({
-                cuentaId: gastosExtraAccount.id,
-                cuentaCode: gastosExtraAccount.code,
-                cuentaName: gastosExtraAccount.name,
-                tipo: 'DEBITO',
-                monto: ajuste.monto,
-                montoUSD: 0,
-                descripcion: `Contrapartida ajuste: ${ajuste.descripcion}`
-            });
-        }
-
         movimientos.push({
             cuentaId: cuentaData.id,
             cuentaCode: cuentaData.code,
@@ -1645,6 +2234,16 @@ export const aprobarAjusteManual = async (ajusteId, userId, userEmail) => {
             descripcion: ajuste.descripcion
         });
     }
+
+    movimientos.push({
+        cuentaId: cuentaContrapartidaData.id,
+        cuentaCode: cuentaContrapartidaData.code,
+        cuentaName: cuentaContrapartidaData.name,
+        tipo: tipoContrapartida,
+        monto: ajuste.monto,
+        montoUSD: 0,
+        descripcion: `Contrapartida ajuste: ${ajuste.descripcion}`
+    });
 
     // Registrar asiento contable
     const entry = await registerAccountingEntry({
@@ -1660,7 +2259,9 @@ export const aprobarAjusteManual = async (ajusteId, userId, userEmail) => {
         metadata: { 
             tipo: 'ajusteManual',
             cuentaAjustada: cuentaData.name,
-            tipoMovimiento: ajuste.tipoMovimiento
+            cuentaContrapartida: cuentaContrapartidaData.name,
+            tipoMovimiento: ajuste.tipoMovimiento,
+            tipoContrapartida
         }
     });
 
@@ -1744,6 +2345,8 @@ export const resetERPDatabase = async ({ userId, userEmail, reason = 'manual-res
         'depositosTransito',
         'depositosBancarios',
         'cierresCajaERP',
+        'activosFijos',
+        'depreciacionesActivosFijos',
         'ajustesManuales',
         'asientosContables',
         'movimientosContables'
@@ -1791,6 +2394,9 @@ export default {
     confirmarDepositoBancarioERP,
     createFacturaProveedor,
     registrarPagoProveedor,
+    createActivoFijo,
+    generarDepreciacionActivoFijo,
+    generarDepreciacionMensualActivos,
     createAjusteManual,
     aprobarAjusteManual,
     rechazarAjusteManual,

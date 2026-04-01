@@ -44,6 +44,40 @@ const normalizeTipoMovimiento = (movimiento) =>
 
 const normalizeCode = (code) => String(code || '').replace(/\./g, '');
 
+const normalizeSearchText = (value) =>
+    String(value || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim();
+
+const getMovimientoAccountId = (movimiento) =>
+    movimiento?.accountId || movimiento?.cuentaId || movimiento?.cuenta?.id || null;
+
+const getMovimientoAccountCode = (movimiento) =>
+    movimiento?.accountCode || movimiento?.cuentaCode || movimiento?.cuenta?.code || '';
+
+const getMovimientoTimestampValue = (movimiento) => {
+    if (typeof movimiento?.timestamp?.toMillis === 'function') {
+        return movimiento.timestamp.toMillis();
+    }
+
+    if (typeof movimiento?.timestamp?.seconds === 'number') {
+        return movimiento.timestamp.seconds * 1000;
+    }
+
+    if (typeof movimiento?.createdAt?.toMillis === 'function') {
+        return movimiento.createdAt.toMillis();
+    }
+
+    if (typeof movimiento?.createdAt?.seconds === 'number') {
+        return movimiento.createdAt.seconds * 1000;
+    }
+
+    const parsedDate = new Date(movimiento?.fecha || '').getTime();
+    return Number.isNaN(parsedDate) ? 0 : parsedDate;
+};
+
 const getNatureByType = (type) =>
     ['ACTIVO', 'COSTO', 'GASTO'].includes(type) ? 'DEUDORA' : 'ACREEDORA';
 
@@ -63,6 +97,7 @@ const ChartOfAccounts = () => {
     const [showAccountModal, setShowAccountModal] = useState(false);
     const [editingAccount, setEditingAccount] = useState(null);
     const [expandedGroups, setExpandedGroups] = useState({});
+    const [loadingMovimientos, setLoadingMovimientos] = useState(false);
     
     // Filtros de movimientos
     const [filtroFechaDesde, setFiltroFechaDesde] = useState('');
@@ -126,9 +161,8 @@ const ChartOfAccounts = () => {
 
     useEffect(() => {
         const movimientosRef = collection(db, 'movimientosContables');
-        const q = query(movimientosRef, orderBy('timestamp', 'desc'));
 
-        const unsubscribe = onSnapshot(q, (snapshot) => {
+        const unsubscribe = onSnapshot(movimientosRef, (snapshot) => {
             const data = snapshot.docs.map((docSnapshot) => {
                 const raw = docSnapshot.data();
                 const tipo = normalizeTipoMovimiento(raw);
@@ -148,57 +182,58 @@ const ChartOfAccounts = () => {
     }, []);
 
     // Cargar movimientos cuando se selecciona una cuenta
-    const cargarMovimientosCuenta = async (account) => {
+    const cargarMovimientosCuenta = (account) => {
+        setLoadingMovimientos(true);
+
         try {
-            setLoading(true);
-            const accountId = account?.id;
-            const accountCode = account?.code;
-            const movimientosRef = collection(db, 'movimientosContables');
-            let q = query(
-                movimientosRef,
-                where('accountId', '==', accountId),
-                orderBy('timestamp', 'desc')
-            );
+            const accountIds = new Set();
+            const accountCodes = new Set();
 
-            // También buscar por código de cuenta para mayor cobertura
-            const q2 = query(
-                movimientosRef,
-                where('accountCode', '==', accountCode),
-                orderBy('timestamp', 'desc')
-            );
+            const collectAccountHierarchy = (currentAccount) => {
+                if (!currentAccount?.id) return;
 
-            const [snapshot1, snapshot2] = await Promise.all([getDocs(q), getDocs(q2)]);
-            
-            const mapMovimiento = (snapshotDoc) => {
-                const raw = snapshotDoc.data();
-                const tipo = normalizeTipoMovimiento(raw);
+                accountIds.add(currentAccount.id);
 
-                return {
-                    id: snapshotDoc.id,
-                    ...raw,
-                    tipo,
-                    type: raw.type || tipo
-                };
+                const currentCode = normalizeCode(currentAccount.code);
+                if (currentCode) {
+                    accountCodes.add(currentCode);
+                }
+
+                accounts
+                    .filter((item) => item.parentId === currentAccount.id)
+                    .forEach((child) => collectAccountHierarchy(child));
             };
 
-            const movs1 = snapshot1.docs.map(mapMovimiento);
-            const movs2 = snapshot2.docs.map(mapMovimiento);
-            
-            // Combinar y eliminar duplicados
-            const combined = [...movs1, ...movs2];
-            const unique = combined.filter((mov, index, self) => 
-                index === self.findIndex(m => m.id === mov.id)
-            );
-            
-            setMovimientos(unique.sort((a, b) => 
-                (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)
-            ));
+            collectAccountHierarchy(account);
+
+            const unique = allMovimientos
+                .filter((movimiento) => {
+                    const movimientoAccountId = getMovimientoAccountId(movimiento);
+                    const movimientoAccountCode = normalizeCode(getMovimientoAccountCode(movimiento));
+
+                    return (
+                        (movimientoAccountId && accountIds.has(movimientoAccountId)) ||
+                        (movimientoAccountCode && accountCodes.has(movimientoAccountCode))
+                    );
+                })
+                .filter((mov, index, self) =>
+                    index === self.findIndex((item) => item.id === mov.id)
+                )
+                .sort((a, b) => getMovimientoTimestampValue(b) - getMovimientoTimestampValue(a));
+
+            setMovimientos(unique);
         } catch (err) {
             console.error('Error cargando movimientos:', err);
+            setMovimientos([]);
         } finally {
-            setLoading(false);
+            setLoadingMovimientos(false);
         }
     };
+
+    useEffect(() => {
+        if (!showMovementsModal || !selectedAccount) return;
+        cargarMovimientosCuenta(selectedAccount);
+    }, [allMovimientos, selectedAccount, showMovementsModal]);
 
     // Filtrar movimientos
     const movimientosFiltrados = useMemo(() => {
@@ -243,13 +278,27 @@ const ChartOfAccounts = () => {
     }, [accounts]);
 
     // Filtrar cuentas para vista de lista
-    const filteredAccounts = useMemo(() => {
-        if (!searchTerm) return accounts;
-        return accounts.filter(account => 
-            account.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            account.code?.includes(searchTerm)
+    const normalizedSearchTerm = useMemo(() => normalizeSearchText(searchTerm), [searchTerm]);
+
+    const accountMatchesSearch = (account) => {
+        if (!normalizedSearchTerm) return true;
+
+        const normalizedName = normalizeSearchText(account?.name);
+        const normalizedDescription = normalizeSearchText(account?.description);
+        const normalizedCodeValue = normalizeCode(account?.code);
+        const normalizedSearchCode = normalizeCode(normalizedSearchTerm);
+
+        return (
+            normalizedName.includes(normalizedSearchTerm) ||
+            normalizedDescription.includes(normalizedSearchTerm) ||
+            normalizedCodeValue.includes(normalizedSearchCode)
         );
-    }, [accounts, searchTerm]);
+    };
+
+    const filteredAccounts = useMemo(() => {
+        if (!normalizedSearchTerm) return accounts;
+        return accounts.filter(accountMatchesSearch);
+    }, [accounts, normalizedSearchTerm]);
 
     // Agrupar cuentas por tipo
     const accountsByType = useMemo(() => {
@@ -259,6 +308,26 @@ const ChartOfAccounts = () => {
         });
         return grouped;
     }, [accounts]);
+
+    const filterAccountTree = (nodes) =>
+        nodes.reduce((accumulator, node) => {
+            const filteredChildren = filterAccountTree(node.children || []);
+            const matchesNode = accountMatchesSearch(node);
+
+            if (!normalizedSearchTerm || matchesNode || filteredChildren.length > 0) {
+                accumulator.push({
+                    ...node,
+                    children: filteredChildren
+                });
+            }
+
+            return accumulator;
+        }, []);
+
+    const filteredAccountTree = useMemo(() => {
+        if (!normalizedSearchTerm) return accountTree;
+        return filterAccountTree(accountTree);
+    }, [accountTree, normalizedSearchTerm]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
@@ -318,10 +387,13 @@ const ChartOfAccounts = () => {
         setShowAccountModal(true);
     };
 
-    const handleViewMovements = async (account) => {
+    const handleViewMovements = (account) => {
         setSelectedAccount(account);
         setShowMovementsModal(true);
-        await cargarMovimientosCuenta(account);
+        setFiltroFechaDesde('');
+        setFiltroFechaHasta('');
+        setFiltroTipo('todos');
+        cargarMovimientosCuenta(account);
     };
 
     const resetForm = () => {
@@ -361,6 +433,10 @@ const ChartOfAccounts = () => {
     const renderAccountTree = (nodes, level = 0) => {
         return nodes.map(account => (
             <div key={account.id} className="">
+                {(() => {
+                    const shouldExpand = normalizedSearchTerm ? true : expandedGroups[account.id];
+
+                    return (
                 <div 
                     className={`group flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer border-l-2 ${
                         selectedAccount?.id === account.id 
@@ -372,9 +448,9 @@ const ChartOfAccounts = () => {
                     {account.isGroup ? (
                         <button
                             onClick={() => toggleGroup(account.id)}
-                            className="p-0.5 hover:bg-slate-200 rounded"
-                        >
-                            {expandedGroups[account.id] ? 
+                        className="p-0.5 hover:bg-slate-200 rounded"
+                    >
+                            {shouldExpand ? 
                                 <ChevronDown className="w-4 h-4 text-slate-500" /> : 
                                 <ChevronRight className="w-4 h-4 text-slate-500" />
                             }
@@ -423,8 +499,10 @@ const ChartOfAccounts = () => {
                         </button>
                     </div>
                 </div>
+                    );
+                })()}
                 
-                {account.isGroup && expandedGroups[account.id] && account.children?.length > 0 && (
+                {account.isGroup && (normalizedSearchTerm ? true : expandedGroups[account.id]) && account.children?.length > 0 && (
                     <div className="">
                         {renderAccountTree(account.children, level + 1)}
                     </div>
@@ -549,13 +627,13 @@ const ChartOfAccounts = () => {
                         <span className="w-24"></span>
                     </div>
                     <div className="divide-y divide-slate-100">
-                        {accountTree.length === 0 ? (
+                        {filteredAccountTree.length === 0 ? (
                             <div className="p-8 text-center text-slate-500">
                                 <BookOpen className="w-12 h-12 mx-auto mb-4 text-slate-300" />
-                                <p>No hay cuentas registradas</p>
+                                <p>{searchTerm ? 'No se encontraron cuentas' : 'No hay cuentas registradas'}</p>
                             </div>
                         ) : (
-                            renderAccountTree(accountTree)
+                            renderAccountTree(filteredAccountTree)
                         )}
                     </div>
                 </div>
@@ -920,7 +998,7 @@ const ChartOfAccounts = () => {
                             </div>
 
                             {/* Tabla de movimientos */}
-                            {loading ? (
+                            {loadingMovimientos ? (
                                 <div className="flex items-center justify-center py-12">
                                     <RefreshCw className="w-8 h-8 animate-spin text-blue-600" />
                                 </div>

@@ -39,6 +39,7 @@ const Header = ({ sidebarOpen: externalSidebarOpen, setSidebarOpen: externalSetS
             icon: BookOpen,
             items: [
                 { path: '/plan-cuentas', label: 'Plan de Cuentas', icon: BookOpen },
+                { path: '/activos-fijos', label: 'Activos Fijos', icon: Package },
                 { path: '/movimientos', label: 'Movimientos Contables', icon: FileText },
                 { path: '/asientos', label: 'Asientos Contables', icon: Calculator },
                 { path: '/ajustes-manuales', label: 'Ajustes Manuales', icon: TrendingUp },

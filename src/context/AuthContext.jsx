@@ -45,6 +45,7 @@ export const PERMISOS = {
         puedeVerReportes: true,
         modulos: [
             'plan-cuentas',
+            'activos-fijos',
             'movimientos-contables',
             'cuentas-pagar',
             'proveedores',
@@ -83,6 +84,7 @@ export const PERMISOS = {
         puedeVerReportes: true,
         modulos: [
             'plan-cuentas',
+            'activos-fijos',
             'movimientos-contables',
             'reportes',
             'dashboard-financiero',

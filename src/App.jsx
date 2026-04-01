@@ -28,6 +28,7 @@ import DataEntry from './components/DataEntry';
 // Módulos Financieros - Contabilidad
 import ChartOfAccounts from './components/ChartOfAccounts';
 import GastosDiarios from './components/GastosDiarios';
+import ActivosFijos from './components/ActivosFijos';
 
 // NUEVOS MÓDULOS: Ventas y Gastos
 import Ventas from './components/Ventas';
@@ -153,6 +154,11 @@ function App() {
                     <Route 
                         path="/plan-cuentas" 
                         element={<PrivatePage element={<ChartOfAccounts />} modulo="plan-cuentas" />} 
+                    />
+
+                    <Route 
+                        path="/activos-fijos" 
+                        element={<PrivatePage element={<ActivosFijos />} modulo="activos-fijos" />} 
                     />
                     
                     {/* Cierre de Caja ERP */}
