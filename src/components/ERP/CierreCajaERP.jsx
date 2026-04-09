@@ -3,8 +3,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { doc, getDoc, getDocs, collection, updateDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../../firebase';
+import { db } from '../../firebase';
 import { useAuth } from '../../context/AuthContext';
 import { usePlanCuentas } from '../../hooks/useUnifiedAccounting';
 import { useBranches } from '../../hooks/useBranches';
@@ -17,6 +16,7 @@ import {
     calculateArqueoTotals,
     calculateCierreCajaTotals
 } from '../../utils/cierreCajaCalculations';
+import { createImageAttachment, fetchImageAttachment } from '../../utils/imageAttachments';
 import { format, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { 
@@ -97,9 +97,7 @@ const createInitialFormData = (defaultSucursal = null) => ({
 
 const MAX_CIERRE_FOTOS = 5;
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
-
-const sanitizeStorageFileName = (fileName = 'foto.jpg') =>
-    fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+const MAX_CIERRE_ATTACHMENT_BYTES = 95 * 1024;
 
 const getDisplayCierreCode = (cierre) => {
     if (cierre?.codigoCierre) return cierre.codigoCierre;
@@ -124,6 +122,8 @@ const CierreCajaERP = () => {
     const [cierresCompletados, setCierresCompletados] = useState([]);
     const [loading, setLoading] = useState(true);
     const [viewingCierre, setViewingCierre] = useState(null); // Cierre en modo lectura
+    const [viewingCierreFotos, setViewingCierreFotos] = useState([]);
+    const [loadingViewingCierreFotos, setLoadingViewingCierreFotos] = useState(false);
     
     // Formulario de nuevo cierre
     const [formData, setFormData] = useState({
@@ -302,6 +302,78 @@ const CierreCajaERP = () => {
         loadCierres();
     }, []);
 
+    useEffect(() => {
+        let cancelled = false;
+
+        const resolveViewingCierreFotos = async () => {
+            if (!viewingCierre) {
+                setViewingCierreFotos([]);
+                setLoadingViewingCierreFotos(false);
+                return;
+            }
+
+            const fotos = Array.isArray(viewingCierre.fotos) ? viewingCierre.fotos : [];
+            if (!fotos.length) {
+                setViewingCierreFotos([]);
+                setLoadingViewingCierreFotos(false);
+                return;
+            }
+
+            setLoadingViewingCierreFotos(true);
+
+            try {
+                const fotosResueltas = await Promise.all(
+                    fotos.map(async (foto, index) => {
+                        const existingUrl =
+                            typeof foto === 'string'
+                                ? foto
+                                : foto?.url || foto?.downloadURL || foto?.comprobanteURL || foto?.dataUrl || null;
+
+                        if (existingUrl) {
+                            return {
+                                ...(typeof foto === 'object' && foto ? foto : {}),
+                                url: existingUrl,
+                                name:
+                                    (typeof foto === 'object' && foto?.name) ||
+                                    `Foto ${index + 1}`
+                            };
+                        }
+
+                        if (!foto?.attachmentId) return null;
+
+                        try {
+                            const attachment = await fetchImageAttachment(foto.attachmentId);
+                            if (!attachment?.dataUrl) return null;
+
+                            return {
+                                ...foto,
+                                url: attachment.dataUrl,
+                                name: foto?.name || attachment.originalName || `Foto ${index + 1}`
+                            };
+                        } catch (attachmentError) {
+                            console.error('Error cargando foto adjunta del cierre:', attachmentError);
+                            return null;
+                        }
+                    })
+                );
+
+                if (!cancelled) {
+                    setViewingCierreFotos(fotosResueltas.filter(Boolean));
+                }
+            } finally {
+                if (!cancelled) {
+                    setLoadingViewingCierreFotos(false);
+                }
+            }
+        };
+
+        resolveViewingCierreFotos();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [viewingCierre]);
+
     // Calcular totales
     const totales = useMemo(() => calculateCierreCajaTotals(formData), [formData]);
     const arqueoTotales = useMemo(() => calculateArqueoTotals(formData), [formData]);
@@ -383,24 +455,26 @@ const CierreCajaERP = () => {
     const uploadCierrePhotos = async () => {
         if (!cierrePhotosRef.current.length) return [];
 
-        const loteId = `${Date.now()}_${user?.uid || 'anonimo'}`;
-
         return Promise.all(
             cierrePhotosRef.current.map(async (photo, index) => {
-                const safeName = sanitizeStorageFileName(photo.name || `foto_${index + 1}.jpg`);
-                const storageRef = ref(
-                    storage,
-                    `comprobantes/cierres-caja/${loteId}/${index + 1}_${safeName}`
-                );
-
-                await uploadBytes(storageRef, photo.file);
-                const url = await getDownloadURL(storageRef);
+                const attachment = await createImageAttachment({
+                    file: photo.file,
+                    entityType: 'cierreCajaERP',
+                    entityId: null,
+                    category: 'fotoCierreCaja',
+                    fileName: photo.name || `foto_${index + 1}.jpg`,
+                    userId: user?.uid || null,
+                    userEmail: user?.email || null,
+                    maxDimension: 1280,
+                    maxDataUrlBytes: MAX_CIERRE_ATTACHMENT_BYTES
+                });
 
                 return {
-                    url,
+                    attachmentId: attachment.attachmentId,
                     name: photo.name || `Foto ${index + 1}`,
                     size: photo.size || 0,
-                    uploadedAt: new Date().toISOString()
+                    uploadedAt: attachment.uploadedAt,
+                    storageType: attachment.storageType
                 };
             })
         );
@@ -1608,7 +1682,7 @@ const CierreCajaERP = () => {
         const cierre = viewingCierre;
         const retenciones = cierre.retenciones || [];
         const gastosCaja = cierre.gastosCaja || [];
-        const fotosCierre = Array.isArray(cierre.fotos) ? cierre.fotos : [];
+        const fotosCierre = viewingCierreFotos;
         
         return (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -1786,7 +1860,14 @@ const CierreCajaERP = () => {
                             </div>
                         )}
 
-                        {fotosCierre.length > 0 && (
+                        {loadingViewingCierreFotos && (
+                            <div className="bg-gray-50 rounded-lg p-4 flex items-center gap-3 text-gray-600">
+                                <RefreshCw className="w-5 h-5 animate-spin" />
+                                Cargando fotos adjuntas...
+                            </div>
+                        )}
+
+                        {!loadingViewingCierreFotos && fotosCierre.length > 0 && (
                             <div className="bg-gray-50 rounded-lg p-4">
                                 <div className="flex items-center justify-between gap-4 mb-4">
                                     <h3 className="font-semibold">Fotos Adjuntas</h3>
@@ -1796,10 +1877,7 @@ const CierreCajaERP = () => {
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     {fotosCierre.map((foto, index) => {
-                                        const fotoUrl =
-                                            typeof foto === 'string'
-                                                ? foto
-                                                : foto?.url || foto?.downloadURL || foto?.comprobanteURL || null;
+                                        const fotoUrl = foto?.url || null;
 
                                         if (!fotoUrl) return null;
 

@@ -1,14 +1,11 @@
 // src/components/ConfirmacionDeposito.jsx - Confirmación de Depósitos Bancarios
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { db, storage } from '../firebase';
-import { 
-    collection, query, where, orderBy, onSnapshot, 
-    doc, getDoc, updateDoc, Timestamp, addDoc 
-} from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db } from '../firebase';
+import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { usePlanCuentas } from '../hooks/useUnifiedAccounting';
 import { confirmarDepositoBancarioERP } from '../services/unifiedAccountingService';
+import { createImageAttachment, fetchImageAttachment } from '../utils/imageAttachments';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { 
@@ -19,7 +16,7 @@ import {
 } from 'lucide-react';
 
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
-const UPLOAD_TIMEOUT_MS = 45000;
+const MAX_DEPOSITO_ATTACHMENT_BYTES = 180 * 1024;
 
 const createInitialConfirmForm = () => ({
     bancoDestinoId: '',
@@ -35,17 +32,6 @@ const revokePreviewUrl = (url) => {
     }
 };
 
-const sanitizeStorageFileName = (fileName = 'comprobante.jpg') =>
-    fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-
-const runWithTimeout = (promise, timeoutMessage, timeoutMs = UPLOAD_TIMEOUT_MS) =>
-    Promise.race([
-        promise,
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs)
-        )
-    ]);
-
 const getUploadErrorMessage = (error) => {
     if (!error) {
         return 'No se pudo subir la imagen del comprobante.';
@@ -55,16 +41,7 @@ const getUploadErrorMessage = (error) => {
         return error.message;
     }
 
-    switch (error.code) {
-        case 'storage/unauthorized':
-            return 'Firebase Storage rechazó la imagen por permisos. Revise las reglas de Storage.';
-        case 'storage/canceled':
-            return 'La subida de la imagen fue cancelada.';
-        case 'storage/retry-limit-exceeded':
-            return 'La subida excedió el tiempo de espera. Intente de nuevo con una imagen más liviana.';
-        default:
-            return 'No se pudo subir la imagen del comprobante.';
-    }
+    return 'No se pudo subir la imagen del comprobante.';
 };
 
 const ConfirmacionDeposito = () => {
@@ -174,10 +151,13 @@ const ConfirmacionDeposito = () => {
         setError(null);
         
         try {
-            // Subir imagen si hay una seleccionada
             let comprobanteURL = null;
+            let comprobanteAdjuntoId = null;
+            let comprobanteAdjuntoName = null;
             if (selectedFile) {
-                comprobanteURL = await uploadImage(selectedFile, selectedDeposito.id);
+                const comprobanteAdjunto = await uploadImage(selectedFile, selectedDeposito.id);
+                comprobanteAdjuntoId = comprobanteAdjunto.attachmentId;
+                comprobanteAdjuntoName = comprobanteAdjunto.name;
             }
             
             const banco = cuentasBanco.find(b => b.id === bancoDestinoIdFinal);
@@ -190,6 +170,8 @@ const ConfirmacionDeposito = () => {
                 horaDeposito: confirmForm.horaDeposito,
                 referenciaBancaria: confirmForm.referenciaBancaria,
                 comprobanteURL,
+                comprobanteAdjuntoId,
+                comprobanteAdjuntoName,
                 comentarios: confirmForm.comentarios,
                 userId: user.uid,
                 userEmail: user.email
@@ -249,26 +231,64 @@ const ConfirmacionDeposito = () => {
         
         setUploadingImage(true);
         try {
-            const timestamp = Date.now();
-            const safeName = sanitizeStorageFileName(file.name || 'comprobante.jpg');
-            const storagePath = `comprobantes/depositos-bancarios/${depositoId}/${timestamp}_${safeName}`;
-            const storageRef = ref(storage, storagePath);
-            
-            await runWithTimeout(
-                uploadBytes(storageRef, file),
-                'La subida del comprobante tardó demasiado. Intente de nuevo con una imagen más liviana.'
-            );
-            const downloadURL = await runWithTimeout(
-                getDownloadURL(storageRef),
-                'La imagen se subió, pero no se pudo obtener el enlace del comprobante.'
-            );
-            
-            return downloadURL;
+            return await createImageAttachment({
+                file,
+                entityType: 'confirmacionDeposito',
+                entityId: depositoId,
+                category: 'comprobanteBancario',
+                fileName: file.name,
+                userId: user?.uid || null,
+                userEmail: user?.email || null,
+                maxDimension: 1600,
+                maxDataUrlBytes: MAX_DEPOSITO_ATTACHMENT_BYTES
+            });
         } catch (err) {
             console.error('Error subiendo imagen:', err);
             throw new Error(getUploadErrorMessage(err));
         } finally {
             setUploadingImage(false);
+        }
+    };
+
+    const openComprobanteViewer = async (deposito) => {
+        if (!deposito) return;
+
+        if (deposito.comprobanteURL) {
+            setViewerComprobante({
+                numero: deposito.numero,
+                url: deposito.comprobanteURL,
+                loading: false
+            });
+            return;
+        }
+
+        if (!deposito.comprobanteAdjuntoId) {
+            setError('Este depósito no tiene comprobante guardado.');
+            return;
+        }
+
+        setViewerComprobante({
+            numero: deposito.numero,
+            url: null,
+            loading: true
+        });
+
+        try {
+            const attachment = await fetchImageAttachment(deposito.comprobanteAdjuntoId);
+
+            if (!attachment?.dataUrl) {
+                throw new Error('No se encontró la imagen del comprobante.');
+            }
+
+            setViewerComprobante({
+                numero: deposito.numero,
+                url: attachment.dataUrl,
+                loading: false
+            });
+        } catch (err) {
+            console.error('Error cargando comprobante:', err);
+            setViewerComprobante(null);
+            setError(err.message || 'No se pudo cargar el comprobante guardado.');
         }
     };
 
@@ -463,13 +483,10 @@ const ConfirmacionDeposito = () => {
                                                 <span className="text-sm text-slate-500">
                                                     {deposito.bancoDestinoName || 'Confirmado'}
                                                 </span>
-                                                {deposito.comprobanteURL && (
+                                                {(deposito.comprobanteURL || deposito.comprobanteAdjuntoId) && (
                                                     <button
                                                         type="button"
-                                                        onClick={() => setViewerComprobante({
-                                                            url: deposito.comprobanteURL,
-                                                            numero: deposito.numero
-                                                        })}
+                                                        onClick={() => openComprobanteViewer(deposito)}
                                                         className="text-xs text-blue-600 hover:text-blue-700 hover:underline flex items-center gap-1"
                                                     >
                                                         <Eye className="w-3.5 h-3.5" />
@@ -733,23 +750,36 @@ const ConfirmacionDeposito = () => {
 
                         <div className="p-4 space-y-4">
                             <div className="bg-slate-100 rounded-xl overflow-hidden flex items-center justify-center min-h-[320px]">
-                                <img
-                                    src={viewerComprobante.url}
-                                    alt={`Comprobante depósito ${viewerComprobante.numero}`}
-                                    className="max-h-[70vh] w-full object-contain"
-                                    loading="lazy"
-                                />
+                                {viewerComprobante.loading ? (
+                                    <div className="flex flex-col items-center gap-3 text-slate-600">
+                                        <RefreshCw className="w-8 h-8 animate-spin" />
+                                        <p className="text-sm">Cargando comprobante...</p>
+                                    </div>
+                                ) : viewerComprobante.url ? (
+                                    <img
+                                        src={viewerComprobante.url}
+                                        alt={`Comprobante depósito ${viewerComprobante.numero}`}
+                                        className="max-h-[70vh] w-full object-contain"
+                                        loading="lazy"
+                                    />
+                                ) : (
+                                    <div className="text-sm text-slate-500">
+                                        No se pudo cargar la imagen del comprobante.
+                                    </div>
+                                )}
                             </div>
 
                             <div className="flex justify-end">
-                                <a
-                                    href={viewerComprobante.url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
-                                >
-                                    Abrir imagen
-                                </a>
+                                {viewerComprobante.url && (
+                                    <a
+                                        href={viewerComprobante.url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                                    >
+                                        Abrir imagen
+                                    </a>
+                                )}
                             </div>
                         </div>
                     </div>

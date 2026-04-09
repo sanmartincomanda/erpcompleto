@@ -1414,6 +1414,8 @@ export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData)
         horaDeposito,
         referenciaBancaria,
         comprobanteURL,
+        comprobanteAdjuntoId,
+        comprobanteAdjuntoName,
         comentarios,
         userId,
         userEmail
@@ -1548,6 +1550,11 @@ export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData)
     // Solo incluir comprobanteURL si tiene valor
     if (comprobanteURL) {
         updateData.comprobanteURL = comprobanteURL;
+    }
+
+    if (comprobanteAdjuntoId) {
+        updateData.comprobanteAdjuntoId = comprobanteAdjuntoId;
+        updateData.comprobanteAdjuntoName = comprobanteAdjuntoName || 'Comprobante depósito';
     }
     
     batch.update(depositoRef, updateData);
