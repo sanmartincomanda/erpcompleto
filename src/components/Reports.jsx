@@ -9,7 +9,9 @@ import {
     RefreshCw,
     TrendingUp,
     PieChart,
-    Building2
+    Building2,
+    ChevronDown,
+    ChevronUp
 } from 'lucide-react';
 import { format, startOfMonth, endOfMonth } from 'date-fns';
 import { useBranches } from '../hooks/useBranches';
@@ -74,6 +76,8 @@ const Reports = () => {
     });
 
     const [movimientos, setMovimientos] = useState([]);
+    const [detalleGastosOperativos, setDetalleGastosOperativos] = useState([]);
+    const [mostrarDetalleGastos, setMostrarDetalleGastos] = useState(false);
 
     useEffect(() => {
         loadData();
@@ -121,6 +125,7 @@ const Reports = () => {
             let ingresos = 0;
             let costos = 0;
             let gastos = 0;
+            const gastosDetallados = [];
 
             movimientosPeriodo.forEach((movimiento) => {
                 const account =
@@ -135,8 +140,20 @@ const Reports = () => {
                     costos += movimiento.monto;
                 } else if (account.type === 'GASTO' && movimiento.tipo === 'DEBITO') {
                     gastos += movimiento.monto;
+                    gastosDetallados.push({
+                        id: movimiento.id,
+                        fecha: movimiento.fecha,
+                        sucursalName: movimiento.sucursalName,
+                        accountCode: movimiento.accountCode || account.code || '',
+                        accountName: movimiento.accountName || account.name || 'Cuenta de gasto',
+                        descripcion: movimiento.descripcion || 'Gasto operativo',
+                        referencia: movimiento.referencia || '-',
+                        monto: movimiento.monto
+                    });
                 }
             });
+
+            setDetalleGastosOperativos(gastosDetallados);
 
             setEstadoResultados({
                 ingresos,
@@ -227,9 +244,77 @@ const Reports = () => {
                             {formatCurrency(estadoResultados.utilidadBruta)}
                         </span>
                     </div>
-                    <div className="flex justify-between items-center py-2 border-b">
-                        <span className="font-medium">Gastos Operativos</span>
-                        <span className="text-red-600 font-bold">({formatCurrency(estadoResultados.gastos)})</span>
+                    <div className="border-b">
+                        <button
+                            type="button"
+                            onClick={() => setMostrarDetalleGastos((prev) => !prev)}
+                            className="w-full flex justify-between items-center py-2 text-left"
+                        >
+                            <span className="font-medium flex items-center gap-2">
+                                Gastos Operativos
+                                {mostrarDetalleGastos ? (
+                                    <ChevronUp className="w-4 h-4 text-gray-500" />
+                                ) : (
+                                    <ChevronDown className="w-4 h-4 text-gray-500" />
+                                )}
+                            </span>
+                            <span className="text-red-600 font-bold">({formatCurrency(estadoResultados.gastos)})</span>
+                        </button>
+
+                        {mostrarDetalleGastos && (
+                            <div className="pb-4">
+                                <div className="rounded-lg border border-slate-200 overflow-hidden mt-2">
+                                    {detalleGastosOperativos.length === 0 ? (
+                                        <div className="p-4 text-sm text-slate-500 bg-slate-50">
+                                            No hay gastos operativos en el período seleccionado.
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                                                <span className="text-sm font-medium text-slate-700">
+                                                    Detalle de gastos del período
+                                                </span>
+                                                <span className="text-sm text-slate-500">
+                                                    {detalleGastosOperativos.length} movimiento(s)
+                                                </span>
+                                            </div>
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-sm">
+                                                    <thead className="bg-white">
+                                                        <tr className="border-b border-slate-200">
+                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Fecha</th>
+                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Sucursal</th>
+                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Cuenta</th>
+                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Descripción</th>
+                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Referencia</th>
+                                                            <th className="px-4 py-3 text-right font-medium text-slate-700">Monto</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-100">
+                                                        {detalleGastosOperativos.map((gasto) => (
+                                                            <tr key={gasto.id} className="hover:bg-slate-50">
+                                                                <td className="px-4 py-3">{gasto.fecha}</td>
+                                                                <td className="px-4 py-3">{gasto.sucursalName}</td>
+                                                                <td className="px-4 py-3">
+                                                                    <span className="font-mono text-xs">{gasto.accountCode}</span>
+                                                                    <br />
+                                                                    <span className="text-slate-600">{gasto.accountName}</span>
+                                                                </td>
+                                                                <td className="px-4 py-3">{gasto.descripcion}</td>
+                                                                <td className="px-4 py-3 font-mono">{gasto.referencia}</td>
+                                                                <td className="px-4 py-3 text-right font-medium text-red-600">
+                                                                    {formatCurrency(gasto.monto)}
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </div>
                     <div className="flex justify-between items-center py-3 bg-blue-50 px-4 rounded-lg">
                         <span className="font-bold text-lg">Utilidad Neta</span>

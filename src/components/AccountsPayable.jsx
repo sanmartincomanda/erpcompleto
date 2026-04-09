@@ -183,6 +183,30 @@ const AccountsPayable = () => {
             .reduce((sum, factura) => sum + Number(factura.saldoPendiente || factura.monto || 0), 0);
     }, [facturasSeleccionadasOrdenadas]);
 
+    const ordenSeleccionMap = useMemo(
+        () => new Map(facturasSeleccionadas.map((facturaId, index) => [facturaId, index + 1])),
+        [facturasSeleccionadas]
+    );
+
+    const previewAplicacionAbono = useMemo(() => {
+        let montoRestante = Number(abonoForm.montoTotal || 0);
+
+        return facturasSeleccionadasOrdenadas
+            .filter((factura) => factura.estado !== 'pagada')
+            .map((factura) => {
+                const saldoPendiente = Number(factura.saldoPendiente || factura.monto || 0);
+                const montoAplicado = Math.max(0, Math.min(saldoPendiente, montoRestante));
+                montoRestante -= montoAplicado;
+
+                return {
+                    ...factura,
+                    saldoPendiente,
+                    montoAplicado,
+                    saldoDespues: Math.max(0, saldoPendiente - montoAplicado)
+                };
+            });
+    }, [abonoForm.montoTotal, facturasSeleccionadasOrdenadas]);
+
     // ============================================
     // GUARDAR FACTURA + ASIENTO CONTABLE
     // ============================================
@@ -628,10 +652,32 @@ const AccountsPayable = () => {
                          facturasFiltradas.length === 0 ? <tr><td colSpan="10" className="px-4 py-8 text-center text-slate-500"><FileText className="w-12 h-12 mx-auto mb-4 text-slate-300" /><p>No hay facturas</p></td></tr> :
                          facturasFiltradas.map(f => {
                             const vencida = f.fechaVencimiento && new Date(f.fechaVencimiento) < new Date() && f.estado !== 'pagada';
+                            const ordenSeleccion = ordenSeleccionMap.get(f.id);
                             return (
                                 <tr key={f.id} className={`hover:bg-slate-50 ${vencida ? 'bg-red-50' : ''}`}>
-                                    <td className="px-3 py-3 text-center">{f.estado !== 'pagada' && <button onClick={() => toggleSeleccionFactura(f.id)}>{facturasSeleccionadas.includes(f.id) ? <CheckSquare className="w-5 h-5 text-blue-600" /> : <Square className="w-5 h-5 text-slate-400" />}</button>}</td>
-                                    <td className="px-3 py-3"><p className="font-medium">{f.numeroFactura}</p>{f.descripcion && <p className="text-xs text-slate-500 truncate max-w-xs">{f.descripcion}</p>}</td>
+                                    <td className="px-3 py-3 text-center">
+                                        {f.estado !== 'pagada' && (
+                                            <button onClick={() => toggleSeleccionFactura(f.id)} className="inline-flex items-center gap-1">
+                                                {facturasSeleccionadas.includes(f.id) ? <CheckSquare className="w-5 h-5 text-blue-600" /> : <Square className="w-5 h-5 text-slate-400" />}
+                                                {ordenSeleccion ? (
+                                                    <span className="inline-flex items-center justify-center min-w-5 h-5 px-1 rounded-full bg-blue-100 text-blue-700 text-[11px] font-bold">
+                                                        {ordenSeleccion}
+                                                    </span>
+                                                ) : null}
+                                            </button>
+                                        )}
+                                    </td>
+                                    <td className="px-3 py-3">
+                                        <div className="flex items-center gap-2">
+                                            <p className="font-medium">{f.numeroFactura}</p>
+                                            {ordenSeleccion ? (
+                                                <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-xs font-medium">
+                                                    Orden {ordenSeleccion}
+                                                </span>
+                                            ) : null}
+                                        </div>
+                                        {f.descripcion && <p className="text-xs text-slate-500 truncate max-w-xs">{f.descripcion}</p>}
+                                    </td>
                                     <td className="px-3 py-3 text-sm">
                                         <p>{f.proveedorNombre || f.cuentaProveedorName || 'Entidad'}</p>
                                         {f.cuentaProveedorCode && (
@@ -733,6 +779,9 @@ const AccountsPayable = () => {
                         <form onSubmit={handleAbonoMultiple} className="p-6 space-y-4">
                             <div className="bg-slate-50 rounded-lg p-4">
                                 <h3 className="font-medium mb-2">Facturas ({facturasSeleccionadas.length})</h3>
+                                <p className="text-xs text-slate-500 mb-2">
+                                    El pago se aplicará exactamente en este orden de selección.
+                                </p>
                                 <div className="max-h-32 overflow-auto space-y-1 text-sm">
                                     {facturasSeleccionadasOrdenadas.map((factura, index) => (
                                         <div key={factura.id} className="flex justify-between gap-3">
@@ -744,6 +793,23 @@ const AccountsPayable = () => {
                                 <div className="border-t pt-2 mt-2 flex justify-between font-bold"><span>Total:</span><span className="text-green-600">{formatCurrency(totalAPagar)}</span></div>
                             </div>
                             <div><label className="block text-sm font-medium text-slate-700 mb-1">Monto *</label><input type="number" step="0.01" value={abonoForm.montoTotal} onChange={(e) => setAbonoForm({...abonoForm, montoTotal: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg font-medium" required /></div>
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                                <h3 className="font-medium text-blue-900 mb-2">Vista previa de aplicación</h3>
+                                <div className="space-y-2 text-sm">
+                                    {previewAplicacionAbono.map((factura, index) => (
+                                        <div key={factura.id} className="flex flex-col gap-1 rounded-lg bg-white px-3 py-2 border border-blue-100">
+                                            <div className="flex justify-between gap-3">
+                                                <span className="font-medium text-slate-900">{index + 1}. {factura.numeroFactura}</span>
+                                                <span className="font-semibold text-blue-700">{formatCurrency(factura.montoAplicado)}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-3 text-xs text-slate-500">
+                                                <span>Saldo actual: {formatCurrency(factura.saldoPendiente)}</span>
+                                                <span>Saldo después: {formatCurrency(factura.saldoDespues)}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
                             <div><label className="block text-sm font-medium text-slate-700 mb-1">Fecha *</label><input type="date" value={abonoForm.fecha} onChange={(e) => setAbonoForm({...abonoForm, fecha: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg" required /></div>
                             <div>
                                 <label className="block text-sm font-medium text-slate-700 mb-1">Sucursal *</label>
