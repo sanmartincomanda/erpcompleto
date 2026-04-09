@@ -1,5 +1,5 @@
 // src/components/CierreCajaERP.jsx
-// CORREGIDO: Agregada selección de cuenta de efectivo y modo lectura para cierres completados
+// Flujo de cierre con efectivo en standby, arqueo y vista de cierres completados
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { doc, getDoc, getDocs, collection, updateDoc } from 'firebase/firestore';
@@ -19,7 +19,7 @@ import {
 import { createImageAttachment, fetchImageAttachment } from '../../utils/imageAttachments';
 import { format, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { 
+import {
     Calculator, 
     Save, 
     CheckCircle, 
@@ -48,6 +48,18 @@ import {
     Camera
 } from 'lucide-react';
 
+const createInitialAjusteDiferenciaCaja = () => ({
+    aplicado: false,
+    tipo: '',
+    montoNIO: 0,
+    montoUSD: 0,
+    montoTotal: 0,
+    requiereClave: false,
+    autorizadoConClave: false,
+    autorizadoAt: null,
+    autorizadoBy: ''
+});
+
 const createInitialFormData = (defaultSucursal = null) => ({
     fecha: format(new Date(), 'yyyy-MM-dd'),
     sucursalId: defaultSucursal?.id || '',
@@ -59,7 +71,8 @@ const createInitialFormData = (defaultSucursal = null) => ({
     horaCierre: format(new Date(), 'HH:mm'),
     observaciones: '',
     totalIngreso: '',
-    totalFacturasCredito: '0',
+    totalFacturasCreditoBrutas: '0',
+    totalFacturasCreditoCanceladas: '0',
     totalAbonosRecibidos: '0',
     efectivoCS: '',
     efectivoUSD: '',
@@ -89,15 +102,14 @@ const createInitialFormData = (defaultSucursal = null) => ({
         diferenciaCS: 0,
         comentarioDiferencia: ''
     },
-    cuentaEfectivoId: '',
-    cuentaEfectivoCode: '',
-    cuentaEfectivoName: '',
+    ajusteDiferenciaCaja: createInitialAjusteDiferenciaCaja(),
     fotos: []
 });
 
 const MAX_CIERRE_FOTOS = 5;
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_CIERRE_ATTACHMENT_BYTES = 95 * 1024;
+const CLAVE_FALTANTE_MAYOR = 'afirmativo';
 
 const getDisplayCierreCode = (cierre) => {
     if (cierre?.codigoCierre) return cierre.codigoCierre;
@@ -126,69 +138,7 @@ const CierreCajaERP = () => {
     const [loadingViewingCierreFotos, setLoadingViewingCierreFotos] = useState(false);
     
     // Formulario de nuevo cierre
-    const [formData, setFormData] = useState({
-        fecha: format(new Date(), 'yyyy-MM-dd'),
-        sucursalId: '',
-        sucursalName: '',
-        tienda: '',
-        caja: '',
-        cajero: '',
-        horaApertura: '06:00',
-        horaCierre: format(new Date(), 'HH:mm'),
-        observaciones: '',
-        
-        // Datos SICAR
-        totalIngreso: '',
-        
-        // Créditos
-        totalFacturasCredito: '0',
-        totalAbonosRecibidos: '0',
-        
-        // Métodos de pago
-        efectivoCS: '',
-        efectivoUSD: '',
-        tipoCambio: '36.50',
-        posBAC: '0',
-        posBANPRO: '0',
-        posLAFISE: '0',
-        transferenciaBAC: '0',
-        transferenciaBANPRO: '0',
-        transferenciaLAFISE: '0',
-        
-        // NUEVO: Transferencias USD
-        transferenciaBAC_USD: '0',
-        transferenciaLAFISE_USD: '0',
-        
-        // Retenciones
-        retenciones: [],
-        
-        // Gastos de caja
-        gastosCaja: [],
-        arqueoRealizado: false,
-        
-        // Arqueo
-        arqueo: {
-            billetes100: 0,
-            billetes50: 0,
-            billetes20: 0,
-            billetes10: 0,
-            billetes5: 0,
-            billetes1: 0,
-            monedas: 0,
-            efectivoUSDFisico: 0,
-            totalArqueoCS: 0,
-            totalArqueo: 0,
-            diferenciaCS: 0,
-            comentarioDiferencia: ''
-        },
-        
-        // NUEVO: Cuenta de efectivo seleccionada
-        cuentaEfectivoId: '',
-        cuentaEfectivoCode: '',
-        cuentaEfectivoName: '',
-        
-        fotos: []
-    });
+    const [formData, setFormData] = useState(() => createInitialFormData());
 
     const [submitting, setSubmitting] = useState(false);
     const [submitAction, setSubmitAction] = useState(null);
@@ -196,6 +146,7 @@ const CierreCajaERP = () => {
     const [success, setSuccess] = useState(null);
     const [processedNotice, setProcessedNotice] = useState(null);
     const [cierrePhotos, setCierrePhotos] = useState([]);
+    const [claveFaltante, setClaveFaltante] = useState('');
     const cierrePhotoInputRef = useRef(null);
     const cierrePhotosRef = useRef([]);
 
@@ -223,13 +174,7 @@ const CierreCajaERP = () => {
     }, []);
 
     // Hooks
-    const { 
-        getCajaAccounts, 
-        getGastoAccounts,
-        accounts 
-    } = usePlanCuentas();
-
-    const cuentasCaja = useMemo(() => getCajaAccounts('NIO'), [getCajaAccounts]);
+    const { getGastoAccounts, accounts } = usePlanCuentas();
     const cuentasGastos = useMemo(() => getGastoAccounts(), [getGastoAccounts]);
     const cuentasRetencionPasivo = useMemo(
         () => accounts
@@ -377,6 +322,43 @@ const CierreCajaERP = () => {
     // Calcular totales
     const totales = useMemo(() => calculateCierreCajaTotals(formData), [formData]);
     const arqueoTotales = useMemo(() => calculateArqueoTotals(formData), [formData]);
+    const diferenciaCajaPendiente = Math.abs(arqueoTotales.diferenciaCaja) > 0.01;
+    const requiereClaveFaltante =
+        arqueoTotales.diferenciaCaja < 0 &&
+        Math.abs(arqueoTotales.diferenciaCaja) >= 50;
+    const tipoAjusteDiferencia = arqueoTotales.diferenciaCaja < 0 ? 'faltante' : 'sobrante';
+
+    useEffect(() => {
+        if (!formData.ajusteDiferenciaCaja?.aplicado) return;
+
+        const montoTotalActual = Number(formData.ajusteDiferenciaCaja?.montoTotal || 0);
+        const montoNIOActual = Number(formData.ajusteDiferenciaCaja?.montoNIO || 0);
+        const montoUSDActual = Number(formData.ajusteDiferenciaCaja?.montoUSD || 0);
+        const tipoActual = String(formData.ajusteDiferenciaCaja?.tipo || '');
+
+        if (
+            Math.abs(montoTotalActual - Math.abs(arqueoTotales.diferenciaCaja)) > 0.01 ||
+            Math.abs(montoNIOActual - Math.abs(arqueoTotales.diferenciaNIO)) > 0.01 ||
+            Math.abs(montoUSDActual - Math.abs(arqueoTotales.diferenciaUSD)) > 0.01 ||
+            tipoActual !== tipoAjusteDiferencia
+        ) {
+            setFormData((prev) => ({
+                ...prev,
+                ajusteDiferenciaCaja: createInitialAjusteDiferenciaCaja()
+            }));
+            setClaveFaltante('');
+        }
+    }, [
+        arqueoTotales.diferenciaCaja,
+        arqueoTotales.diferenciaNIO,
+        arqueoTotales.diferenciaUSD,
+        formData.ajusteDiferenciaCaja?.aplicado,
+        formData.ajusteDiferenciaCaja?.montoNIO,
+        formData.ajusteDiferenciaCaja?.montoTotal,
+        formData.ajusteDiferenciaCaja?.montoUSD,
+        formData.ajusteDiferenciaCaja?.tipo,
+        tipoAjusteDiferencia
+    ]);
 
     const resetCierrePhotos = () => {
         cierrePhotosRef.current.forEach((photo) => {
@@ -485,6 +467,7 @@ const CierreCajaERP = () => {
         setFormData(prev => ({
             ...prev,
             arqueoRealizado: true,
+            ajusteDiferenciaCaja: createInitialAjusteDiferenciaCaja(),
             arqueo: {
                 ...prev.arqueo,
                 totalArqueoCS: arqueoTotales.totalArqueoCS,
@@ -492,17 +475,20 @@ const CierreCajaERP = () => {
                 diferenciaCS: arqueoTotales.diferenciaCaja
             }
         }));
+        setClaveFaltante('');
     };
 
     // Manejar cambios en arqueo
     const handleArqueoChange = (field, value) => {
         setFormData(prev => ({
             ...prev,
+            ajusteDiferenciaCaja: createInitialAjusteDiferenciaCaja(),
             arqueo: {
                 ...prev.arqueo,
                 [field]: Number(value) || 0
             }
         }));
+        setClaveFaltante('');
     };
 
     // Agregar retención
@@ -539,24 +525,7 @@ const CierreCajaERP = () => {
                             return { ...r, [field]: value };
                         }
 
-                        const cuenta =
-                            cuentasRetencionPasivo.find((account) => account.id === value) ||
-                            (() => {
-                                const searchTerm =
-                                    value === 'IR'
-                                        ? 'ir'
-                                        : value === 'Alcaldia'
-                                          ? 'alcal'
-                                          : '';
-
-                                return searchTerm
-                                    ? cuentasRetencionPasivo.find((account) =>
-                                        `${account.code || ''} ${account.name || ''}`
-                                            .toLowerCase()
-                                            .includes(searchTerm)
-                                    )
-                                    : null;
-                            })();
+                        const cuenta = cuentasRetencionPasivo.find((account) => account.id === value);
 
                         return {
                             ...r,
@@ -581,6 +550,53 @@ const CierreCajaERP = () => {
         }
 
         return true;
+    };
+
+    const validarDatosSicar = () => {
+        if (totales.totalFacturasCreditoCanceladas > totales.totalFacturasCreditoBrutas) {
+            setError('Las facturas de credito canceladas no pueden ser mayores a las facturas de credito registradas.');
+            return false;
+        }
+
+        if (totales.totalAbonosRecibidos > totales.totalIngresoRegistrado) {
+            setError('Los abonos no pueden ser mayores al Ingreso total SICAR.');
+            return false;
+        }
+
+        return true;
+    };
+
+    const enviarDiferenciaCaja = () => {
+        if (!formData.arqueoRealizado) {
+            setError('Primero debe confirmar el arqueo para poder enviar la diferencia.');
+            return;
+        }
+
+        if (!diferenciaCajaPendiente) {
+            setError('No hay diferencia de caja pendiente para enviar.');
+            return;
+        }
+
+        if (requiereClaveFaltante && claveFaltante !== CLAVE_FALTANTE_MAYOR) {
+            setError(`Para faltantes mayores o iguales a C$ 50.00 debe ingresar la clave secreta "${CLAVE_FALTANTE_MAYOR}".`);
+            return;
+        }
+
+        setFormData((prev) => ({
+            ...prev,
+            ajusteDiferenciaCaja: {
+                aplicado: true,
+                tipo: tipoAjusteDiferencia,
+                montoNIO: Math.abs(arqueoTotales.diferenciaNIO),
+                montoUSD: Math.abs(arqueoTotales.diferenciaUSD),
+                montoTotal: Math.abs(arqueoTotales.diferenciaCaja),
+                requiereClave: requiereClaveFaltante,
+                autorizadoConClave: requiereClaveFaltante,
+                autorizadoAt: new Date().toISOString(),
+                autorizadoBy: user?.email || ''
+            }
+        }));
+        setError(null);
     };
 
     // Agregar gasto
@@ -629,10 +645,7 @@ const CierreCajaERP = () => {
     const handleGuardar = async (e) => {
         e.preventDefault();
         if (submitting) return;
-        if (totales.totalAbonosRecibidos > totales.totalIngresoRegistrado) {
-            setError('Los abonos no pueden ser mayores al Ingreso total SICAR.');
-            return;
-        }
+        if (!validarDatosSicar()) return;
         if (!validarRetenciones()) return;
         setSubmitting(true);
         setSubmitAction('guardar');
@@ -644,7 +657,9 @@ const CierreCajaERP = () => {
 
             await createCierreCajaERP({
                 ...formData,
+                totalFacturasCredito: totales.totalFacturasCredito,
                 fotos: fotosAdjuntas,
+                ajusteDiferenciaCaja: formData.ajusteDiferenciaCaja,
                 userId: user.uid,
                 userEmail: user.email
             });
@@ -654,6 +669,7 @@ const CierreCajaERP = () => {
             // Resetear formulario
             setFormData(createInitialFormData(sucursalPredeterminada));
             resetCierrePhotos();
+            setClaveFaltante('');
 
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
@@ -673,7 +689,12 @@ const CierreCajaERP = () => {
             return;
         }
 
+        if (!validarDatosSicar()) return;
         if (!validarRetenciones()) return;
+        if (formData.arqueoRealizado && diferenciaCajaPendiente && !formData.ajusteDiferenciaCaja?.aplicado) {
+            setError('Debe enviar la diferencia a faltante o sobrante de caja antes de procesar el cierre.');
+            return;
+        }
         setSubmitting(true);
         setSubmitAction('cerrar');
         setError(null);
@@ -686,7 +707,9 @@ const CierreCajaERP = () => {
 
             cierreCreado = await createCierreCajaERP({
                 ...formData,
+                totalFacturasCredito: totales.totalFacturasCredito,
                 fotos: fotosAdjuntas,
+                ajusteDiferenciaCaja: formData.ajusteDiferenciaCaja,
                 userId: user.uid,
                 userEmail: user.email
             });
@@ -698,6 +721,7 @@ const CierreCajaERP = () => {
             await loadCierres();
             setFormData(createInitialFormData(sucursalPredeterminada));
             resetCierrePhotos();
+            setClaveFaltante('');
             setViewingCierre(null);
             setActiveTab('completados');
             setSuccess('Cierre de caja procesado exitosamente');
@@ -757,7 +781,7 @@ const CierreCajaERP = () => {
                     <FileText className="w-5 h-5 text-blue-600" />
                     Información General
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Fecha *</label>
                         <input
@@ -833,44 +857,35 @@ const CierreCajaERP = () => {
                         />
                     </div>
                 </div>
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="rounded-lg bg-green-50 border border-green-200 p-4">
+                        <p className="text-sm text-green-700">Ventas al Contado del Cierre</p>
+                        <p className="text-2xl font-bold text-green-900">
+                            {formatCurrency(totales.totalVentasContado)}
+                        </p>
+                    </div>
+                    <div className="rounded-lg bg-blue-50 border border-blue-200 p-4">
+                        <p className="text-sm text-blue-700">Regla del Cuadre</p>
+                        <p className="text-sm text-blue-900 mt-1">
+                            Métodos de pago + gastos + retenciones deben explicar el total del ingreso SICAR del cierre.
+                        </p>
+                    </div>
+                </div>
             </div>
 
-            {/* NUEVO: Configuración de Cuenta de Efectivo */}
+            {/* Efectivo en Standby */}
             <div className="bg-white rounded-lg shadow p-6">
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Building2 className="w-5 h-5 text-blue-600" />
-                    Configuración Contable
+                    Efectivo en Standby
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Cuenta de Efectivo (Caja) *
-                        </label>
-                        <select
-                            value={formData.cuentaEfectivoId}
-                            onChange={(e) => {
-                                const cuenta = cuentasCaja.find(c => c.id === e.target.value);
-                                setFormData(prev => ({
-                                    ...prev,
-                                    cuentaEfectivoId: e.target.value,
-                                    cuentaEfectivoCode: cuenta?.code || '',
-                                    cuentaEfectivoName: cuenta?.name || ''
-                                }));
-                            }}
-                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            required
-                        >
-                            <option value="">Seleccione una cuenta...</option>
-                            {cuentasCaja.map(cuenta => (
-                                <option key={cuenta.id} value={cuenta.id}>
-                                    {cuenta.code} - {cuenta.name}
-                                </option>
-                            ))}
-                        </select>
-                        <p className="text-sm text-gray-500 mt-1">
-                            Esta cuenta se usará para registrar los movimientos de efectivo
-                        </p>
-                    </div>
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                    <p className="font-medium text-blue-900">
+                        El efectivo del cierre ya no se vincula a una cuenta manual de caja.
+                    </p>
+                    <p className="text-sm text-blue-700 mt-2">
+                        Queda en standby como dinero en tránsito y se lleva al banco cuando confirmas el depósito con foto y referencia bancaria.
+                    </p>
                 </div>
             </div>
 
@@ -880,7 +895,7 @@ const CierreCajaERP = () => {
                     <TrendingUp className="w-5 h-5 text-green-600" />
                     Datos SICAR
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                             Total Ingreso SICAR *
@@ -897,16 +912,37 @@ const CierreCajaERP = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Total Facturas Crédito
+                            Facturas de Crédito
                         </label>
                         <input
                             type="number"
                             step="0.01"
-                            value={formData.totalFacturasCredito}
-                            onChange={(e) => setFormData(prev => ({ ...prev, totalFacturasCredito: e.target.value }))}
+                            value={formData.totalFacturasCreditoBrutas}
+                            onChange={(e) => setFormData(prev => ({ ...prev, totalFacturasCreditoBrutas: e.target.value }))}
                             placeholder="0.00"
                             className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
                         />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Facturas Crédito Canceladas
+                        </label>
+                        <input
+                            type="number"
+                            step="0.01"
+                            value={formData.totalFacturasCreditoCanceladas}
+                            onChange={(e) => setFormData(prev => ({ ...prev, totalFacturasCreditoCanceladas: e.target.value }))}
+                            placeholder="0.00"
+                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Total de Facturas de Crédito
+                        </label>
+                        <div className="w-full px-3 py-2 border rounded-lg bg-slate-50 text-slate-700 font-semibold">
+                            {formatCurrency(totales.totalFacturasCredito)}
+                        </div>
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1126,8 +1162,6 @@ const CierreCajaERP = () => {
                                         {cuenta.code} - {cuenta.name}
                                     </option>
                                 ))}
-                                <option value="IR">IR (Retención IR)</option>
-                                <option value="Alcaldia">Alcaldía</option>
                             </select>
                             <p className="text-xs text-gray-500 mt-1">
                                 Use una cuenta de obligaciones para que el cierre genere el pasivo correcto.
@@ -1359,6 +1393,7 @@ const CierreCajaERP = () => {
                 </p>
                 
                 {arqueoTotales.totalArqueo > 0 && (
+                    <>
                     <div className="mt-4 p-4 bg-gray-50 rounded-lg">
                         <div className="flex justify-between items-center">
                             <span className="font-medium">Arqueo C$:</span>
@@ -1385,6 +1420,50 @@ const CierreCajaERP = () => {
                             </span>
                         </div>
                     </div>
+                    {diferenciaCajaPendiente && (
+                        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+                            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                                <div>
+                                    <p className="font-semibold text-amber-900">
+                                        {tipoAjusteDiferencia === 'faltante'
+                                            ? 'Enviar a Faltante de Caja'
+                                            : 'Enviar a Sobrante de Caja'}
+                                    </p>
+                                    <p className="text-sm text-amber-800 mt-1">
+                                        {tipoAjusteDiferencia === 'faltante'
+                                            ? 'El faltante se registrarÃ¡ en Otros Gastos Diversos.'
+                                            : 'El sobrante se registrarÃ¡ en Otros Ingresos Diversos.'}
+                                    </p>
+                                    {formData.ajusteDiferenciaCaja?.aplicado && (
+                                        <p className="text-sm text-green-700 mt-2 font-medium">
+                                            Diferencia enviada correctamente al ajuste de caja.
+                                        </p>
+                                    )}
+                                </div>
+                                <div className="w-full lg:w-auto flex flex-col sm:flex-row gap-3">
+                                    {requiereClaveFaltante && (
+                                        <input
+                                            type="password"
+                                            value={claveFaltante}
+                                            onChange={(e) => setClaveFaltante(e.target.value)}
+                                            placeholder='Clave secreta: afirmativo'
+                                            className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-amber-500"
+                                        />
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={enviarDiferenciaCaja}
+                                        className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700"
+                                    >
+                                        {tipoAjusteDiferencia === 'faltante'
+                                            ? 'Enviar a Faltante'
+                                            : 'Enviar a Sobrante'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    </>
                 )}
             </div>
 
@@ -1396,7 +1475,7 @@ const CierreCajaERP = () => {
                 </h3>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div className="p-4 bg-blue-50 rounded-lg">
-                        <p className="text-sm text-gray-600">Efectivo Físico</p>
+                        <p className="text-sm text-gray-600">Efectivo en Standby</p>
                         <p className="text-xl font-bold text-blue-600">{formatCurrency(totales.totalEfectivo)}</p>
                     </div>
                     <div className="p-4 bg-purple-50 rounded-lg">
@@ -1739,12 +1818,12 @@ const CierreCajaERP = () => {
                             </div>
                         </div>
 
-                        {/* Cuenta de Efectivo */}
-                        {cierre.cuentaEfectivo && (
+                        {/* Efectivo en Standby */}
+                        {(cierre.cuentaStandbyEfectivo || cierre.cuentaEfectivo) && (
                             <div className="bg-blue-50 rounded-lg p-4">
-                                <h3 className="font-semibold mb-3">Cuenta Contable de Efectivo</h3>
+                                <h3 className="font-semibold mb-3">Efectivo en Standby</h3>
                                 <p className="font-medium">
-                                    {cierre.cuentaEfectivo.code} - {cierre.cuentaEfectivo.name}
+                                    {(cierre.cuentaStandbyEfectivo || cierre.cuentaEfectivo)?.code} - {(cierre.cuentaStandbyEfectivo || cierre.cuentaEfectivo)?.name}
                                 </p>
                             </div>
                         )}
@@ -1752,14 +1831,26 @@ const CierreCajaERP = () => {
                         {/* Totales */}
                         <div className="bg-gray-50 rounded-lg p-4">
                             <h3 className="font-semibold mb-3">Totales</h3>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                                 <div>
                                     <p className="text-sm text-gray-500">Total Ingreso SICAR</p>
                                     <p className="font-medium">{formatCurrency(cierre.totalIngreso ?? cierre.cuadre?.totalIngreso)}</p>
                                 </div>
                                 <div>
-                                    <p className="text-sm text-gray-500">Facturas de crÃ©dito</p>
-                                    <p className="font-medium">{formatCurrency(cierre.totalFacturasCredito)}</p>
+                                    <p className="text-sm text-gray-500">Ventas al contado</p>
+                                    <p className="font-medium">{formatCurrency(cierre.cuadre?.totalVentasContado ?? cierre.totalVentasContado)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500">Crédito bruto</p>
+                                    <p className="font-medium">{formatCurrency(cierre.totalFacturasCreditoBrutas ?? cierre.cuadre?.totalFacturasCreditoBrutas)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500">Crédito cancelado</p>
+                                    <p className="font-medium">{formatCurrency(cierre.totalFacturasCreditoCanceladas ?? cierre.cuadre?.totalFacturasCreditoCanceladas)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500">Total facturas de crédito</p>
+                                    <p className="font-medium">{formatCurrency(cierre.totalFacturasCredito ?? cierre.cuadre?.totalFacturasCredito)}</p>
                                 </div>
                                 <div>
                                     <p className="text-sm text-gray-500">Abonos recibidos</p>

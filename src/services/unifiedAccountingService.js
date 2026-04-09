@@ -117,6 +117,7 @@ const CUENTAS_DGI = {
     VENTAS_MERCADERIA: '410101',
     VENTAS_PRODUCTOS: '410102',
     VENTAS_SERVICIOS: '410103',
+    OTROS_INGRESOS_DIVERSOS: '410205',
     
     // COSTOS
     COSTO_VENTAS: '510101',
@@ -125,7 +126,8 @@ const CUENTAS_DGI = {
     GASTOS_ADMIN: '6101',
     GASTOS_VENTAS: '6102',
     GASTO_ALCALDIA_VENTAS: '610304',
-    GASTOS_EXTRAORDINARIOS: '610302'
+    GASTOS_EXTRAORDINARIOS: '610302',
+    OTROS_GASTOS_DIVERSOS: '610399'
 };
 
 const TIPOS_DEUDORA = new Set(['ACTIVO', 'COSTO', 'GASTO']);
@@ -490,6 +492,8 @@ export const createCierreCajaERP = async (cierreData) => {
         transferenciaLAFISE_USD,
         
         // Créditos y abonos
+        totalFacturasCreditoBrutas,
+        totalFacturasCreditoCanceladas,
         totalFacturasCredito,
         facturasCredito,
         totalAbonosRecibidos,
@@ -508,12 +512,8 @@ export const createCierreCajaERP = async (cierreData) => {
         arqueo,
         
         // Configuración
-        cuentaEfectivoId,
-        cuentaEfectivoCode,
-        cuentaEfectivoName,
-        
-        // Fotos
         fotos,
+        ajusteDiferenciaCaja,
         
         userId,
         userEmail
@@ -524,13 +524,39 @@ export const createCierreCajaERP = async (cierreData) => {
     const codigoCierre = buildCierreCodigo(numeroCierre);
     const shouldPersistArqueo = Boolean(arqueoRealizado) || hasArqueoData(arqueo);
     const arqueoTotals = shouldPersistArqueo ? calculateArqueoTotals(cierreData) : null;
+    const dineroTransitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
+
+    if (cierreTotals.totalEfectivo > 0 && !dineroTransitoAccount) {
+        throw new Error('No se encontro la cuenta Dinero en Transito (110104). Cargue el plan DGI antes de procesar cierres con efectivo.');
+    }
+
     const arqueoCalculado = shouldPersistArqueo ? {
         ...arqueo,
         totalArqueoCS: arqueoTotals.totalArqueoCS,
         efectivoUSDFisico: arqueoTotals.efectivoUSDFisico,
         totalArqueo: arqueoTotals.totalArqueo,
-        diferenciaCS: arqueoTotals.diferenciaCaja
+        diferenciaCS: arqueoTotals.diferenciaCaja,
+        diferenciaNIO: arqueoTotals.diferenciaNIO,
+        diferenciaUSD: arqueoTotals.diferenciaUSD
     } : null;
+    const cuentaStandbyEfectivo = dineroTransitoAccount
+        ? {
+            id: dineroTransitoAccount.id,
+            code: dineroTransitoAccount.code,
+            name: dineroTransitoAccount.name
+        }
+        : null;
+    const ajusteDiferenciaCajaNormalizado = {
+        aplicado: Boolean(ajusteDiferenciaCaja?.aplicado),
+        tipo: String(ajusteDiferenciaCaja?.tipo || '').toLowerCase(),
+        montoNIO: roundToTwo(ajusteDiferenciaCaja?.montoNIO ?? Math.abs(arqueoTotals?.diferenciaNIO || 0)),
+        montoUSD: roundToTwo(ajusteDiferenciaCaja?.montoUSD ?? Math.abs(arqueoTotals?.diferenciaUSD || 0)),
+        montoTotal: roundToTwo(ajusteDiferenciaCaja?.montoTotal ?? Math.abs(arqueoTotals?.diferenciaCaja || 0)),
+        requiereClave: Boolean(ajusteDiferenciaCaja?.requiereClave),
+        autorizadoConClave: Boolean(ajusteDiferenciaCaja?.autorizadoConClave),
+        autorizadoBy: ajusteDiferenciaCaja?.autorizadoBy || userEmail || '',
+        autorizadoAt: ajusteDiferenciaCaja?.autorizadoAt || null
+    };
 
     const cierre = {
         numeroCierre,
@@ -560,7 +586,16 @@ export const createCierreCajaERP = async (cierreData) => {
         transferenciaBAC_USD: Number(transferenciaBAC_USD || 0),
         transferenciaLAFISE_USD: Number(transferenciaLAFISE_USD || 0),
         
-        totalFacturasCredito: Number(totalFacturasCredito || 0),
+        totalFacturasCreditoBrutas: Number(
+            totalFacturasCreditoBrutas ??
+            totalFacturasCredito ??
+            cierreTotals.totalFacturasCreditoBrutas
+        ),
+        totalFacturasCreditoCanceladas: Number(
+            totalFacturasCreditoCanceladas ??
+            cierreTotals.totalFacturasCreditoCanceladas
+        ),
+        totalFacturasCredito: cierreTotals.totalFacturasCredito,
         facturasCredito: facturasCredito || [],
         totalAbonosRecibidos: Number(totalAbonosRecibidos || 0),
         abonosRecibidos: abonosRecibidos || [],
@@ -577,8 +612,11 @@ export const createCierreCajaERP = async (cierreData) => {
         cuadre: {
             totalIngreso: cierreTotals.totalIngresoRegistrado,
             totalMediosPago: cierreTotals.totalMediosPago,
+            totalFacturasCreditoBrutas: cierreTotals.totalFacturasCreditoBrutas,
+            totalFacturasCreditoCanceladas: cierreTotals.totalFacturasCreditoCanceladas,
             totalFacturasCredito: cierreTotals.totalFacturasCredito,
             totalAbonosRecibidos: cierreTotals.totalAbonosRecibidos,
+            totalVentasContado: cierreTotals.totalVentasContado,
             totalVentasDelDia: cierreTotals.totalVentasDelDia,
             totalRetenciones: cierreTotals.totalRetenciones,
             totalGastosCaja: cierreTotals.totalGastosCaja,
@@ -586,12 +624,9 @@ export const createCierreCajaERP = async (cierreData) => {
             diferencia: cierreTotals.diferencia,
             estaCuadrado: cierreTotals.estaCuadrado
         },
-        
-        cuentaEfectivo: cuentaEfectivoId ? {
-            id: cuentaEfectivoId,
-            code: cuentaEfectivoCode,
-            name: cuentaEfectivoName
-        } : null,
+
+        cuentaStandbyEfectivo,
+        cuentaEfectivo: cuentaStandbyEfectivo,
         depositoPendiente: {
             nio: {
                 moneda: 'NIO',
@@ -603,9 +638,9 @@ export const createCierreCajaERP = async (cierreData) => {
                 depositoNumero: null,
                 reservadoAt: null,
                 confirmadoAt: null,
-                cuentaOrigenId: cuentaEfectivoId || null,
-                cuentaOrigenCode: cuentaEfectivoCode || null,
-                cuentaOrigenName: cuentaEfectivoName || null
+                cuentaOrigenId: cuentaStandbyEfectivo?.id || null,
+                cuentaOrigenCode: cuentaStandbyEfectivo?.code || null,
+                cuentaOrigenName: cuentaStandbyEfectivo?.name || null
             },
             usd: {
                 moneda: 'USD',
@@ -617,13 +652,14 @@ export const createCierreCajaERP = async (cierreData) => {
                 depositoNumero: null,
                 reservadoAt: null,
                 confirmadoAt: null,
-                cuentaOrigenId: cuentaEfectivoId || null,
-                cuentaOrigenCode: cuentaEfectivoCode || null,
-                cuentaOrigenName: cuentaEfectivoName || null
+                cuentaOrigenId: cuentaStandbyEfectivo?.id || null,
+                cuentaOrigenCode: cuentaStandbyEfectivo?.code || null,
+                cuentaOrigenName: cuentaStandbyEfectivo?.name || null
             }
         },
         
         estado: 'borrador',
+        ajusteDiferenciaCaja: ajusteDiferenciaCajaNormalizado,
         fotos: fotos || [],
         movimientosContablesIds: [],
         
@@ -696,10 +732,11 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
     const fecha = cierre.fecha;
     const referencia = cierre.codigoCierre || `CIERRE-${cierreId}`;
     const cierreTotals = calculateCierreCajaTotals(cierre);
+    const arqueoTotals = cierre.arqueoRealizado ? calculateArqueoTotals(cierre) : null;
     const tipoCambio = getTipoCambio(cierre.tipoCambio);
     const sucursalId = cierre.sucursalId || null;
     const sucursalName = cierre.sucursalName || cierre.tienda || null;
-    const totalVentasDelDia = cierreTotals.totalVentasDelDia;
+    const totalVentasContado = cierreTotals.totalVentasContado;
     const metadataBase = {
         sucursalId,
         sucursalName,
@@ -709,22 +746,24 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
     };
 
     const ventasAccount = await getCuentaByCode(CUENTAS_DGI.VENTAS_MERCADERIA);
-    let cajaAccount = null;
+    let dineroTransitoAccount = null;
     let clientesAccount = null;
 
     if (!ventasAccount) {
         throw new Error('No se encontro la cuenta de ventas (410101). Cargue el Plan DGI primero.');
     }
 
-    if (cierre.cuentaEfectivo?.id) {
-        const cuentaSnap = await getDoc(doc(db, 'planCuentas', cierre.cuentaEfectivo.id));
+    if (cierre.cuentaStandbyEfectivo?.id || cierre.cuentaEfectivo?.id) {
+        const cuentaSnap = await getDoc(
+            doc(db, 'planCuentas', cierre.cuentaStandbyEfectivo?.id || cierre.cuentaEfectivo?.id)
+        );
         if (cuentaSnap.exists()) {
-            cajaAccount = { id: cuentaSnap.id, ...cuentaSnap.data() };
+            dineroTransitoAccount = { id: cuentaSnap.id, ...cuentaSnap.data() };
         }
     }
 
-    if (!cajaAccount) {
-        cajaAccount = await getCuentaByCode(CUENTAS_DGI.CAJA_GENERAL);
+    if (!dineroTransitoAccount) {
+        dineroTransitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
     }
 
     if (cierreTotals.totalAbonosRecibidos > 0 || cierreTotals.totalFacturasCredito > 0) {
@@ -734,7 +773,7 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         }
     }
 
-    if (totalVentasDelDia < -0.01) {
+    if (totalVentasContado < -0.01) {
         throw new Error('Los abonos no pueden ser mayores al Ingreso total SICAR.');
     }
 
@@ -750,15 +789,15 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         });
     };
 
-    if (cajaAccount && cierreTotals.totalEfectivo > 0) {
+    if (dineroTransitoAccount && cierreTotals.totalEfectivo > 0) {
         agregarMovimiento({
-            cuentaId: cajaAccount.id,
-            cuentaCode: cajaAccount.code,
-            cuentaName: cajaAccount.name,
+            cuentaId: dineroTransitoAccount.id,
+            cuentaCode: dineroTransitoAccount.code,
+            cuentaName: dineroTransitoAccount.name,
             tipo: 'DEBITO',
             monto: cierreTotals.totalEfectivo,
             montoUSD: cierreTotals.efectivoUSD,
-            descripcion: `Efectivo neto en ${cierre.caja}`
+            descripcion: `Efectivo en standby del cierre ${cierre.caja}`
         });
     }
 
@@ -918,7 +957,7 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         (sum, retencion) => sum + toNumber(retencion.monto),
         0
     );
-    const totalVentasReconocidas = totalVentasDelDia - totalRetencionesProcesadas;
+    const totalVentasReconocidas = totalVentasContado - totalRetencionesProcesadas;
 
     if (totalVentasReconocidas < -0.01) {
         throw new Error('Las retenciones no pueden exceder las ventas del dia registradas en el cierre.');
@@ -1004,9 +1043,13 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
                 ...metadataBase,
                 tipo: 'cierreConsolidado',
                 totalIngresoSicar: cierreTotals.totalIngresoRegistrado,
-                totalVentasBrutasCierre: totalVentasDelDia,
+                totalVentasContado: totalVentasContado,
+                totalVentasBrutasCierre: totalVentasContado,
                 totalVentasDelDia: totalVentasReconocidas,
                 totalAbonosRecibidos: cierreTotals.totalAbonosRecibidos,
+                totalFacturasCreditoBrutas: cierreTotals.totalFacturasCreditoBrutas,
+                totalFacturasCreditoCanceladas: cierreTotals.totalFacturasCreditoCanceladas,
+                totalFacturasCreditoNetas: cierreTotals.totalFacturasCredito,
                 totalRetenciones: cierreTotals.totalRetenciones,
                 totalRetencionesProcesadas,
                 totalGastosCaja: cierreTotals.totalGastosCaja,
@@ -1057,58 +1100,120 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         movimientosGenerados.push(...entry.movimientos);
     }
 
-    if (cierre.arqueoRealizado && cierre.arqueo && Math.abs(cierre.arqueo.diferenciaCS) > 0.01) {
-        const diferencia = cierre.arqueo.diferenciaCS;
-        const esFaltante = diferencia < 0;
-        const montoDiferencia = Math.abs(diferencia);
-        const gastosExtraAccount = await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+    if (cierre.arqueoRealizado && Math.abs(arqueoTotals?.diferenciaCaja || 0) > 0.01) {
+        if (!cierre.ajusteDiferenciaCaja?.aplicado) {
+            throw new Error('Debe enviar la diferencia a faltante o sobrante de caja antes de procesar este cierre.');
+        }
 
-        if (gastosExtraAccount && cajaAccount) {
-            const movimientosDiferencia = esFaltante
-                ? [
-                    {
-                        cuentaId: gastosExtraAccount.id,
-                        cuentaCode: gastosExtraAccount.code,
-                        cuentaName: gastosExtraAccount.name,
-                        tipo: 'DEBITO',
-                        monto: montoDiferencia,
-                        montoUSD: 0,
-                        descripcion: `Faltante de caja - ${cierre.cajero}`
-                    },
-                    {
-                        cuentaId: cajaAccount.id,
-                        cuentaCode: cajaAccount.code,
-                        cuentaName: cajaAccount.name,
-                        tipo: 'CREDITO',
-                        monto: montoDiferencia,
-                        montoUSD: 0,
-                        descripcion: 'Ajuste por faltante'
-                    }
-                ]
-                : [
-                    {
-                        cuentaId: cajaAccount.id,
-                        cuentaCode: cajaAccount.code,
-                        cuentaName: cajaAccount.name,
-                        tipo: 'DEBITO',
-                        monto: montoDiferencia,
-                        montoUSD: 0,
-                        descripcion: 'Ajuste por sobrante'
-                    },
-                    {
-                        cuentaId: gastosExtraAccount.id,
-                        cuentaCode: gastosExtraAccount.code,
-                        cuentaName: gastosExtraAccount.name,
-                        tipo: 'CREDITO',
-                        monto: montoDiferencia,
-                        montoUSD: 0,
-                        descripcion: 'Sobrante de caja'
-                    }
-                ];
+        const otrosGastosDiversosAccount =
+            await getCuentaByCode(CUENTAS_DGI.OTROS_GASTOS_DIVERSOS) ||
+            await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+        const otrosIngresosDiversosAccount = await getCuentaByCode(CUENTAS_DGI.OTROS_INGRESOS_DIVERSOS);
+        const movimientosDiferencia = [];
+        const pushDiferencia = (movimiento) => {
+            if (toNumber(movimiento?.monto) <= 0) return;
+            movimientosDiferencia.push({
+                ...movimiento,
+                monto: roundToTwo(movimiento.monto),
+                montoUSD: roundToTwo(movimiento.montoUSD)
+            });
+        };
+        const diferenciaNIO = roundToTwo(toNumber(arqueoTotals?.diferenciaNIO));
+        const diferenciaUSD = roundToTwo(toNumber(arqueoTotals?.diferenciaUSD));
 
+        if (diferenciaNIO < -0.01 && otrosGastosDiversosAccount && dineroTransitoAccount) {
+            const monto = Math.abs(diferenciaNIO);
+            pushDiferencia({
+                cuentaId: otrosGastosDiversosAccount.id,
+                cuentaCode: otrosGastosDiversosAccount.code,
+                cuentaName: otrosGastosDiversosAccount.name,
+                tipo: 'DEBITO',
+                monto,
+                montoUSD: 0,
+                descripcion: `Faltante de caja C$ - ${cierre.cajero}`
+            });
+            pushDiferencia({
+                cuentaId: dineroTransitoAccount.id,
+                cuentaCode: dineroTransitoAccount.code,
+                cuentaName: dineroTransitoAccount.name,
+                tipo: 'CREDITO',
+                monto,
+                montoUSD: 0,
+                descripcion: 'Ajuste de standby por faltante en cordobas'
+            });
+        }
+
+        if (diferenciaNIO > 0.01 && otrosIngresosDiversosAccount && dineroTransitoAccount) {
+            pushDiferencia({
+                cuentaId: dineroTransitoAccount.id,
+                cuentaCode: dineroTransitoAccount.code,
+                cuentaName: dineroTransitoAccount.name,
+                tipo: 'DEBITO',
+                monto: diferenciaNIO,
+                montoUSD: 0,
+                descripcion: 'Ajuste de standby por sobrante en cordobas'
+            });
+            pushDiferencia({
+                cuentaId: otrosIngresosDiversosAccount.id,
+                cuentaCode: otrosIngresosDiversosAccount.code,
+                cuentaName: otrosIngresosDiversosAccount.name,
+                tipo: 'CREDITO',
+                monto: diferenciaNIO,
+                montoUSD: 0,
+                descripcion: `Sobrante de caja C$ - ${cierre.cajero}`
+            });
+        }
+
+        if (diferenciaUSD < -0.01 && otrosGastosDiversosAccount && dineroTransitoAccount) {
+            const montoUSD = Math.abs(diferenciaUSD);
+            const monto = roundToTwo(montoUSD * tipoCambio);
+            pushDiferencia({
+                cuentaId: otrosGastosDiversosAccount.id,
+                cuentaCode: otrosGastosDiversosAccount.code,
+                cuentaName: otrosGastosDiversosAccount.name,
+                tipo: 'DEBITO',
+                monto,
+                montoUSD,
+                descripcion: `Faltante de caja USD - ${cierre.cajero}`
+            });
+            pushDiferencia({
+                cuentaId: dineroTransitoAccount.id,
+                cuentaCode: dineroTransitoAccount.code,
+                cuentaName: dineroTransitoAccount.name,
+                tipo: 'CREDITO',
+                monto,
+                montoUSD,
+                descripcion: 'Ajuste de standby por faltante en dolares'
+            });
+        }
+
+        if (diferenciaUSD > 0.01 && otrosIngresosDiversosAccount && dineroTransitoAccount) {
+            const montoUSD = diferenciaUSD;
+            const monto = roundToTwo(montoUSD * tipoCambio);
+            pushDiferencia({
+                cuentaId: dineroTransitoAccount.id,
+                cuentaCode: dineroTransitoAccount.code,
+                cuentaName: dineroTransitoAccount.name,
+                tipo: 'DEBITO',
+                monto,
+                montoUSD,
+                descripcion: 'Ajuste de standby por sobrante en dolares'
+            });
+            pushDiferencia({
+                cuentaId: otrosIngresosDiversosAccount.id,
+                cuentaCode: otrosIngresosDiversosAccount.code,
+                cuentaName: otrosIngresosDiversosAccount.name,
+                tipo: 'CREDITO',
+                monto,
+                montoUSD,
+                descripcion: `Sobrante de caja USD - ${cierre.cajero}`
+            });
+        }
+
+        if (movimientosDiferencia.length > 0) {
             const entry = await registerAccountingEntry({
                 fecha,
-                descripcion: `${esFaltante ? 'Faltante' : 'Sobrante'} de caja - ${cierre.cajero}`,
+                descripcion: `${(arqueoTotals?.diferenciaCaja || 0) < 0 ? 'Faltante' : 'Sobrante'} de caja - ${cierre.cajero}`,
                 referencia,
                 documentoId: cierreId,
                 documentoTipo: DOCUMENT_TYPES.DIFERENCIA_CAJA,
@@ -1120,8 +1225,10 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
                 movimientos: movimientosDiferencia,
                 metadata: {
                     ...metadataBase,
-                    tipo: esFaltante ? 'faltante' : 'sobrante',
-                    monto: montoDiferencia,
+                    tipo: (arqueoTotals?.diferenciaCaja || 0) < 0 ? 'faltante' : 'sobrante',
+                    monto: roundToTwo(Math.abs(arqueoTotals?.diferenciaCaja || 0)),
+                    montoNIO: roundToTwo(Math.abs(diferenciaNIO)),
+                    montoUSD: roundToTwo(Math.abs(diferenciaUSD)),
                     cajero: cierre.cajero
                 }
             });
@@ -1129,9 +1236,13 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         }
     }
 
-    const montoDepositoPendienteNIO = toNumber(cierre.efectivoCS);
-    const montoDepositoPendienteUSD = toNumber(cierre.efectivoUSD);
-    const cuentaOrigenDeposito = cajaAccount || cierre.cuentaEfectivo || null;
+    const montoDepositoPendienteNIO = cierre.arqueoRealizado
+        ? roundToTwo(arqueoTotals?.totalArqueoCS)
+        : toNumber(cierre.efectivoCS);
+    const montoDepositoPendienteUSD = cierre.arqueoRealizado
+        ? roundToTwo(arqueoTotals?.efectivoUSDFisico)
+        : toNumber(cierre.efectivoUSD);
+    const cuentaOrigenDeposito = dineroTransitoAccount || cierre.cuentaStandbyEfectivo || cierre.cuentaEfectivo || null;
 
     await updateDoc(cierreRef, {
         procesado: true,
@@ -1149,9 +1260,9 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
                 depositoNumero: null,
                 reservadoAt: null,
                 confirmadoAt: null,
-                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaEfectivo?.id || null,
-                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaEfectivo?.code || null,
-                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaEfectivo?.name || null
+                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaStandbyEfectivo?.id || cierre.cuentaEfectivo?.id || null,
+                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaStandbyEfectivo?.code || cierre.cuentaEfectivo?.code || null,
+                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaStandbyEfectivo?.name || cierre.cuentaEfectivo?.name || null
             },
             usd: {
                 moneda: 'USD',
@@ -1163,9 +1274,9 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
                 depositoNumero: null,
                 reservadoAt: null,
                 confirmadoAt: null,
-                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaEfectivo?.id || null,
-                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaEfectivo?.code || null,
-                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaEfectivo?.name || null
+                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaStandbyEfectivo?.id || cierre.cuentaEfectivo?.id || null,
+                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaStandbyEfectivo?.code || cierre.cuentaEfectivo?.code || null,
+                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaStandbyEfectivo?.name || cierre.cuentaEfectivo?.name || null
             }
         }
     });
@@ -1305,21 +1416,24 @@ export const createDepositoTransitoERP = async (depositoData) => {
         const cuentaOrigenId =
             cierreOrigen.cuentaOrigenId ||
             pendienteActual?.cuentaOrigenId ||
+            cierre.cuentaStandbyEfectivo?.id ||
             cierre.cuentaEfectivo?.id ||
             null;
         const cuentaOrigenCode =
             cierreOrigen.cuentaOrigenCode ||
             pendienteActual?.cuentaOrigenCode ||
+            cierre.cuentaStandbyEfectivo?.code ||
             cierre.cuentaEfectivo?.code ||
             '';
         const cuentaOrigenName =
             cierreOrigen.cuentaOrigenName ||
             pendienteActual?.cuentaOrigenName ||
+            cierre.cuentaStandbyEfectivo?.name ||
             cierre.cuentaEfectivo?.name ||
             '';
 
         if (!cuentaOrigenId || !cuentaOrigenCode || !cuentaOrigenName) {
-            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} no tiene una cuenta de caja origen configurada.`);
+            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} no tiene una cuenta standby configurada para depÃ³sito.`);
         }
 
         const itemNormalizado = {

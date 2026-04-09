@@ -36,7 +36,17 @@ export const calculateCierreCajaTotals = (data = {}) => {
     const totalTransferencias =
         totalTransferenciasNIO + (totalTransferenciasUSD * tipoCambio);
 
-    const totalFacturasCredito = toNumber(data.totalFacturasCredito);
+    const totalFacturasCreditoBrutas = toNumber(
+        data.totalFacturasCreditoBrutas ??
+        data.totalFacturasCreditoOriginal ??
+        data.totalFacturasCreditoBruto ??
+        data.totalFacturasCredito
+    );
+    const totalFacturasCreditoCanceladas = toNumber(data.totalFacturasCreditoCanceladas);
+    const totalFacturasCredito = Math.max(
+        0,
+        totalFacturasCreditoBrutas - totalFacturasCreditoCanceladas
+    );
     const totalAbonosRecibidos = toNumber(data.totalAbonosRecibidos);
     const totalRetenciones =
         data.totalRetenciones !== undefined
@@ -49,7 +59,7 @@ export const calculateCierreCajaTotals = (data = {}) => {
 
     const totalMediosPago = totalEfectivo + totalPOS + totalTransferencias;
     const totalIngresoRegistrado = toNumber(data.totalIngreso);
-    const totalVentasDelDia = totalIngresoRegistrado - totalAbonosRecibidos;
+    const totalVentasContado = totalIngresoRegistrado - totalAbonosRecibidos;
     const totalEsperado =
         totalMediosPago +
         totalRetenciones +
@@ -65,9 +75,12 @@ export const calculateCierreCajaTotals = (data = {}) => {
         totalTransferenciasNIO,
         totalTransferenciasUSD,
         totalTransferencias,
+        totalFacturasCreditoBrutas,
+        totalFacturasCreditoCanceladas,
         totalFacturasCredito,
         totalAbonosRecibidos,
-        totalVentasDelDia,
+        totalVentasContado,
+        totalVentasDelDia: totalVentasContado,
         totalRetenciones,
         totalGastosCaja,
         totalMediosPago,
@@ -97,12 +110,16 @@ export const calculateArqueoTotals = (data = {}) => {
     const totalArqueo = totalArqueoCS + (efectivoUSDFisico * tipoCambio);
 
     const cierreTotals = calculateCierreCajaTotals(data);
-    const diferenciaCaja = totalArqueo - cierreTotals.totalEfectivo;
+    const diferenciaNIO = totalArqueoCS - cierreTotals.efectivoCS;
+    const diferenciaUSD = efectivoUSDFisico - cierreTotals.efectivoUSD;
+    const diferenciaCaja = diferenciaNIO + (diferenciaUSD * tipoCambio);
 
     return {
         totalArqueoCS,
         efectivoUSDFisico,
         totalArqueo,
+        diferenciaNIO,
+        diferenciaUSD,
         diferenciaCaja
     };
 };

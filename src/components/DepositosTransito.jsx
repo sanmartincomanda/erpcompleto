@@ -38,7 +38,7 @@ const getCierreCodigo = (cierre) => cierre?.codigoCierre || `CIERRE-${String(cie
 const buildPendingLinesFromCierre = (cierre) => {
     const lines = [];
     const depositoPendiente = cierre?.depositoPendiente || {};
-    const cuentaOrigen = cierre?.cuentaEfectivo || {};
+    const cuentaStandby = cierre?.cuentaStandbyEfectivo || cierre?.cuentaEfectivo || {};
     const baseLine = {
         cierreId: cierre.id,
         cierreCodigo: getCierreCodigo(cierre),
@@ -48,9 +48,9 @@ const buildPendingLinesFromCierre = (cierre) => {
         sucursalName: cierre.sucursalName || cierre.tienda || '',
         caja: cierre.caja || '',
         cajero: cierre.cajero || '',
-        cuentaOrigenId: cuentaOrigen.id || null,
-        cuentaOrigenCode: cuentaOrigen.code || '',
-        cuentaOrigenName: cuentaOrigen.name || ''
+        cuentaOrigenId: cuentaStandby.id || null,
+        cuentaOrigenCode: cuentaStandby.code || '',
+        cuentaOrigenName: cuentaStandby.name || ''
     };
 
     const pendingNio = depositoPendiente?.nio;
@@ -78,7 +78,10 @@ const buildPendingLinesFromCierre = (cierre) => {
             montoUSD: 0,
             estado: pendingNio?.estado || 'disponible',
             depositoId: pendingNio?.depositoId || null,
-            depositoNumero: pendingNio?.depositoNumero || null
+            depositoNumero: pendingNio?.depositoNumero || null,
+            cuentaOrigenId: pendingNio?.cuentaOrigenId || baseLine.cuentaOrigenId,
+            cuentaOrigenCode: pendingNio?.cuentaOrigenCode || baseLine.cuentaOrigenCode,
+            cuentaOrigenName: pendingNio?.cuentaOrigenName || baseLine.cuentaOrigenName
         });
     }
 
@@ -104,7 +107,10 @@ const buildPendingLinesFromCierre = (cierre) => {
             montoUSD: Number(pendingUsd?.montoUSD ?? usdAmount) || usdAmount,
             estado: pendingUsd?.estado || 'disponible',
             depositoId: pendingUsd?.depositoId || null,
-            depositoNumero: pendingUsd?.depositoNumero || null
+            depositoNumero: pendingUsd?.depositoNumero || null,
+            cuentaOrigenId: pendingUsd?.cuentaOrigenId || baseLine.cuentaOrigenId,
+            cuentaOrigenCode: pendingUsd?.cuentaOrigenCode || baseLine.cuentaOrigenCode,
+            cuentaOrigenName: pendingUsd?.cuentaOrigenName || baseLine.cuentaOrigenName
         });
     }
 
