@@ -170,9 +170,18 @@ const AccountsPayable = () => {
         setSeleccionarTodas(!seleccionarTodas);
     };
 
+    const facturasSeleccionadasOrdenadas = useMemo(() => {
+        const facturasMap = new Map(facturas.map((factura) => [factura.id, factura]));
+
+        return facturasSeleccionadas
+            .map((facturaId) => facturasMap.get(facturaId))
+            .filter(Boolean);
+    }, [facturas, facturasSeleccionadas]);
+
     const totalAPagar = useMemo(() => {
-        return facturasFiltradas.filter(f => facturasSeleccionadas.includes(f.id)).reduce((s, f) => s + Number(f.saldoPendiente || f.monto || 0), 0);
-    }, [facturasFiltradas, facturasSeleccionadas]);
+        return facturasSeleccionadasOrdenadas
+            .reduce((sum, factura) => sum + Number(factura.saldoPendiente || factura.monto || 0), 0);
+    }, [facturasSeleccionadasOrdenadas]);
 
     // ============================================
     // GUARDAR FACTURA + ASIENTO CONTABLE
@@ -297,7 +306,9 @@ const AccountsPayable = () => {
         setError(null);
         
         try {
-            const facturasAPagar = facturasFiltradas.filter(f => facturasSeleccionadas.includes(f.id));
+            const facturasAPagar = facturasSeleccionadasOrdenadas.filter(
+                (factura) => factura.estado !== 'pagada' && Number(factura.saldoPendiente || factura.monto || 0) > 0
+            );
             const montoTotal = Number(abonoForm.montoTotal);
             const cuentasPasivoSeleccionadas = Array.from(
                 new Map(
@@ -314,6 +325,7 @@ const AccountsPayable = () => {
              
             if (montoTotal <= 0) { setError('El monto debe ser mayor a cero'); return; }
             if (montoTotal > totalAPagar) { setError('El monto excede el saldo pendiente'); return; }
+            if (facturasAPagar.length === 0) { setError('Seleccione al menos una factura pendiente'); return; }
             if (!abonoForm.sucursalId) { setError('Seleccione la sucursal del pago'); return; }
             if ((abonoForm.metodoPago === 'efectivo' || abonoForm.metodoPago === 'transferencia' || abonoForm.metodoPago === 'deposito') && !abonoForm.cuentaOrigenId) {
                 setError(`Seleccione una cuenta de origen para ${abonoForm.metodoPago}`);
@@ -343,8 +355,12 @@ const AccountsPayable = () => {
                 cuentaOrigenName: abonoForm.cuentaOrigenName,
                 referencia: abonoForm.referencia,
                 notas: abonoForm.notas,
-                facturasIds: facturasSeleccionadas,
-                cantidadFacturas: facturasSeleccionadas.length,
+                facturasIds: facturasAPagar.map((factura) => factura.id),
+                cantidadFacturas: facturasAPagar.length,
+                ordenAplicacionFacturas: facturasAPagar.map((factura) => ({
+                    facturaId: factura.id,
+                    numeroFactura: factura.numeroFactura
+                })),
                 estado: 'completado',
                 createdAt: Timestamp.now(),
                 createdBy: user?.uid
@@ -718,7 +734,12 @@ const AccountsPayable = () => {
                             <div className="bg-slate-50 rounded-lg p-4">
                                 <h3 className="font-medium mb-2">Facturas ({facturasSeleccionadas.length})</h3>
                                 <div className="max-h-32 overflow-auto space-y-1 text-sm">
-                                    {facturasFiltradas.filter(f => facturasSeleccionadas.includes(f.id)).map(f => <div key={f.id} className="flex justify-between"><span>{f.numeroFactura}</span><span>{formatCurrency(f.saldoPendiente)}</span></div>)}
+                                    {facturasSeleccionadasOrdenadas.map((factura, index) => (
+                                        <div key={factura.id} className="flex justify-between gap-3">
+                                            <span>{index + 1}. {factura.numeroFactura}</span>
+                                            <span>{formatCurrency(factura.saldoPendiente)}</span>
+                                        </div>
+                                    ))}
                                 </div>
                                 <div className="border-t pt-2 mt-2 flex justify-between font-bold"><span>Total:</span><span className="text-green-600">{formatCurrency(totalAPagar)}</span></div>
                             </div>

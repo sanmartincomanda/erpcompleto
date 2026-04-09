@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, onSnapshot, addDoc, deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Building2, Plus, Trash2, Edit2, RefreshCw, CheckCircle } from 'lucide-react';
+import { getBranchIsActive, normalizeBranch } from '../utils/branches';
 
 const ConfiguracionSucursales = () => {
     const [branches, setBranches] = useState([]);
@@ -12,16 +13,19 @@ const ConfiguracionSucursales = () => {
         name: '',
         address: '',
         phone: '',
-        isActive: true
+        isActive: true,
+        active: true
     });
 
     useEffect(() => {
         const branchesRef = collection(db, 'branches');
         const unsubscribe = onSnapshot(branchesRef, (snapshot) => {
-            const data = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data()
-            }));
+            const data = snapshot.docs
+                .map(doc => normalizeBranch({
+                    id: doc.id,
+                    ...doc.data()
+                }))
+                .sort((left, right) => (left.name || '').localeCompare(right.name || ''));
             setBranches(data);
             setLoading(false);
         });
@@ -31,17 +35,24 @@ const ConfiguracionSucursales = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        const isActive = getBranchIsActive(formData);
+        const payload = {
+            ...formData,
+            name: String(formData.name || '').trim(),
+            active: isActive,
+            isActive
+        };
         try {
             if (editing) {
-                await updateDoc(doc(db, 'branches', editing), formData);
+                await updateDoc(doc(db, 'branches', editing), payload);
                 setEditing(null);
             } else {
                 await addDoc(collection(db, 'branches'), {
-                    ...formData,
+                    ...payload,
                     createdAt: new Date()
                 });
             }
-            setFormData({ name: '', address: '', phone: '', isActive: true });
+            setFormData({ name: '', address: '', phone: '', isActive: true, active: true });
         } catch (err) {
             console.error('Error guardando sucursal:', err);
         }
@@ -53,7 +64,8 @@ const ConfiguracionSucursales = () => {
             name: branch.name || '',
             address: branch.address || '',
             phone: branch.phone || '',
-            isActive: branch.isActive !== false
+            isActive: getBranchIsActive(branch),
+            active: getBranchIsActive(branch)
         });
     };
 
@@ -120,8 +132,8 @@ const ConfiguracionSucursales = () => {
                     <div className="flex items-center gap-2">
                         <input
                             type="checkbox"
-                            checked={formData.isActive}
-                            onChange={(e) => setFormData({ ...formData, isActive: e.target.checked })}
+                            checked={getBranchIsActive(formData)}
+                            onChange={(e) => setFormData({ ...formData, isActive: e.target.checked, active: e.target.checked })}
                             className="w-4 h-4"
                         />
                         <label className="text-sm">Activa</label>
@@ -137,7 +149,7 @@ const ConfiguracionSucursales = () => {
                         {editing && (
                             <button
                                 type="button"
-                                onClick={() => { setEditing(null); setFormData({ name: '', address: '', phone: '', isActive: true }); }}
+                                onClick={() => { setEditing(null); setFormData({ name: '', address: '', phone: '', isActive: true, active: true }); }}
                                 className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
                             >
                                 Cancelar
@@ -165,8 +177,8 @@ const ConfiguracionSucursales = () => {
                                 <td className="px-4 py-3 text-gray-600">{branch.address || '-'}</td>
                                 <td className="px-4 py-3">{branch.phone || '-'}</td>
                                 <td className="px-4 py-3 text-center">
-                                    {branch.isActive !== false ? (
-                                        <span className="text-green-600 flex items-center justify-center gap-1">
+                                {getBranchIsActive(branch) ? (
+                                    <span className="text-green-600 flex items-center justify-center gap-1">
                                             <CheckCircle className="w-4 h-4" /> Activa
                                         </span>
                                     ) : (

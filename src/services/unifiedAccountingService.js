@@ -169,6 +169,16 @@ const chunkItems = (items = [], chunkSize = FIRESTORE_BATCH_LIMIT) => {
     return chunks;
 };
 
+const getNextSequentialNumber = async (collectionName, fieldName = 'numero') => {
+    const collectionRef = collection(db, collectionName);
+    const sequentialQuery = query(collectionRef, orderBy(fieldName, 'desc'), limit(1));
+    const snapshot = await getDocs(sequentialQuery);
+
+    return snapshot.empty ? 1 : Number(snapshot.docs[0].data()?.[fieldName] || 0) + 1;
+};
+
+const buildCierreCodigo = (numeroCierre) => `CC-${String(Number(numeroCierre) || 0).padStart(6, '0')}`;
+
 const roundToTwo = (value) => Math.round((Number(value) || 0) * 100) / 100;
 
 const normalizePeriod = (value) => {
@@ -510,6 +520,8 @@ export const createCierreCajaERP = async (cierreData) => {
     } = cierreData;
 
     const cierreTotals = calculateCierreCajaTotals(cierreData);
+    const numeroCierre = await getNextSequentialNumber('cierresCajaERP', 'numeroCierre');
+    const codigoCierre = buildCierreCodigo(numeroCierre);
     const shouldPersistArqueo = Boolean(arqueoRealizado) || hasArqueoData(arqueo);
     const arqueoTotals = shouldPersistArqueo ? calculateArqueoTotals(cierreData) : null;
     const arqueoCalculado = shouldPersistArqueo ? {
@@ -521,6 +533,8 @@ export const createCierreCajaERP = async (cierreData) => {
     } : null;
 
     const cierre = {
+        numeroCierre,
+        codigoCierre,
         fecha,
         sucursalId: sucursalId || null,
         sucursalName: sucursalName || tienda || '',
@@ -578,6 +592,36 @@ export const createCierreCajaERP = async (cierreData) => {
             code: cuentaEfectivoCode,
             name: cuentaEfectivoName
         } : null,
+        depositoPendiente: {
+            nio: {
+                moneda: 'NIO',
+                monto: 0,
+                montoNIO: 0,
+                montoUSD: 0,
+                estado: 'sin_monto',
+                depositoId: null,
+                depositoNumero: null,
+                reservadoAt: null,
+                confirmadoAt: null,
+                cuentaOrigenId: cuentaEfectivoId || null,
+                cuentaOrigenCode: cuentaEfectivoCode || null,
+                cuentaOrigenName: cuentaEfectivoName || null
+            },
+            usd: {
+                moneda: 'USD',
+                monto: 0,
+                montoNIO: 0,
+                montoUSD: 0,
+                estado: 'sin_monto',
+                depositoId: null,
+                depositoNumero: null,
+                reservadoAt: null,
+                confirmadoAt: null,
+                cuentaOrigenId: cuentaEfectivoId || null,
+                cuentaOrigenCode: cuentaEfectivoCode || null,
+                cuentaOrigenName: cuentaEfectivoName || null
+            }
+        },
         
         estado: 'borrador',
         fotos: fotos || [],
@@ -650,7 +694,7 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
 
     const movimientosGenerados = [];
     const fecha = cierre.fecha;
-    const referencia = `CIERRE-${cierreId}`;
+    const referencia = cierre.codigoCierre || `CIERRE-${cierreId}`;
     const cierreTotals = calculateCierreCajaTotals(cierre);
     const tipoCambio = getTipoCambio(cierre.tipoCambio);
     const sucursalId = cierre.sucursalId || null;
@@ -1085,11 +1129,45 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
         }
     }
 
+    const montoDepositoPendienteNIO = toNumber(cierre.efectivoCS);
+    const montoDepositoPendienteUSD = toNumber(cierre.efectivoUSD);
+    const cuentaOrigenDeposito = cajaAccount || cierre.cuentaEfectivo || null;
+
     await updateDoc(cierreRef, {
         procesado: true,
         procesadoAt: Timestamp.now(),
         movimientosContablesIds: movimientosGenerados.map((mov) => mov.id),
-        totalMovimientos: movimientosGenerados.length
+        totalMovimientos: movimientosGenerados.length,
+        depositoPendiente: {
+            nio: {
+                moneda: 'NIO',
+                monto: montoDepositoPendienteNIO,
+                montoNIO: montoDepositoPendienteNIO,
+                montoUSD: 0,
+                estado: montoDepositoPendienteNIO > 0 ? 'disponible' : 'sin_monto',
+                depositoId: null,
+                depositoNumero: null,
+                reservadoAt: null,
+                confirmadoAt: null,
+                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaEfectivo?.id || null,
+                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaEfectivo?.code || null,
+                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaEfectivo?.name || null
+            },
+            usd: {
+                moneda: 'USD',
+                monto: montoDepositoPendienteUSD,
+                montoNIO: roundToTwo(montoDepositoPendienteUSD * tipoCambio),
+                montoUSD: montoDepositoPendienteUSD,
+                estado: montoDepositoPendienteUSD > 0 ? 'disponible' : 'sin_monto',
+                depositoId: null,
+                depositoNumero: null,
+                reservadoAt: null,
+                confirmadoAt: null,
+                cuentaOrigenId: cuentaOrigenDeposito?.id || cierre.cuentaEfectivo?.id || null,
+                cuentaOrigenCode: cuentaOrigenDeposito?.code || cierre.cuentaEfectivo?.code || null,
+                cuentaOrigenName: cuentaOrigenDeposito?.name || cierre.cuentaEfectivo?.name || null
+            }
+        }
     });
 
     return {
@@ -1108,95 +1186,219 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
 export const createDepositoTransitoERP = async (depositoData) => {
     const {
         fecha,
-        sucursalId,
-        sucursalName,
         responsable,
         moneda,
-        cuentasOrigen,
-        total,
+        bancoDestinoId,
+        bancoDestinoCode,
+        bancoDestinoName,
+        cierresOrigen = [],
         observaciones,
         userId,
         userEmail
     } = depositoData;
 
-    // Buscar cuenta de Dinero en Tránsito
-    const transitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
-    
-    if (!transitoAccount) {
-        throw new Error('No se encontró la cuenta de Dinero en Tránsito (110104). Cargue el Plan DGI primero.');
+    if (!Array.isArray(cierresOrigen) || cierresOrigen.length === 0) {
+        throw new Error('Debe seleccionar al menos un monto pendiente de cierre para crear el depósito.');
     }
 
-    // Generar número de depósito
-    const depositosRef = collection(db, 'depositosTransito');
-    const q = query(depositosRef, orderBy('numero', 'desc'), limit(1));
-    const lastDeposito = await getDocs(q);
-    const numero = lastDeposito.empty ? 1 : (lastDeposito.docs[0].data().numero || 0) + 1;
+    if (!bancoDestinoId) {
+        throw new Error('Debe seleccionar la cuenta bancaria destino del depósito.');
+    }
+
+    const monedaDeposito = String(moneda || cierresOrigen[0]?.moneda || 'NIO').toUpperCase();
+    const bancoDestinoSnap = await getDoc(doc(db, 'planCuentas', bancoDestinoId));
+
+    if (!bancoDestinoSnap.exists()) {
+        throw new Error('Cuenta bancaria destino no encontrada');
+    }
+
+    const bancoData = {
+        id: bancoDestinoSnap.id,
+        ...bancoDestinoSnap.data(),
+        code: bancoDestinoCode || bancoDestinoSnap.data()?.code,
+        name: bancoDestinoName || bancoDestinoSnap.data()?.name
+    };
+
+    const numero = await getNextSequentialNumber('depositosTransito', 'numero');
     const depositoRef = doc(collection(db, 'depositosTransito'));
+    const timestamp = Timestamp.now();
+    const batch = writeBatch(db);
+    const cierresNormalizados = [];
+    const cuentasOrigen = [];
+    let totalMoneda = 0;
+    let totalNIO = 0;
+    let totalUSD = 0;
 
-    // Crear movimientos contables
-    const movimientos = [];
-    
-    for (const cuenta of cuentasOrigen) {
-        // Débito a Dinero en Tránsito
-        movimientos.push({
-            cuentaId: transitoAccount.id,
-            cuentaCode: transitoAccount.code,
-            cuentaName: transitoAccount.name,
-            tipo: 'DEBITO',
-            monto: cuenta.monto,
-            montoUSD: moneda === 'USD' ? cuenta.monto : 0,
-            descripcion: `Depósito en tránsito desde ${cuenta.accountName}`
+    for (const cierreOrigen of cierresOrigen) {
+        const cierreId = cierreOrigen.cierreId || cierreOrigen.id;
+        if (!cierreId) {
+            throw new Error('Uno de los montos seleccionados no está vinculado a un cierre válido.');
+        }
+
+        const cierreRef = doc(db, 'cierresCajaERP', cierreId);
+        const cierreSnap = await getDoc(cierreRef);
+
+        if (!cierreSnap.exists()) {
+            throw new Error('Uno de los cierres seleccionados ya no existe.');
+        }
+
+        const cierre = { id: cierreSnap.id, ...cierreSnap.data() };
+        const monedaItem = String(cierreOrigen.moneda || monedaDeposito).toUpperCase();
+        const currencyKey = monedaItem === 'USD' ? 'usd' : 'nio';
+
+        if (monedaItem !== monedaDeposito) {
+            throw new Error('No se pueden mezclar córdobas y dólares en un mismo depósito.');
+        }
+
+        const pendienteActual = cierre.depositoPendiente?.[currencyKey];
+        const montoMoneda = monedaItem === 'USD'
+            ? toNumber(
+                cierreOrigen.monto ??
+                cierreOrigen.montoUSD ??
+                pendienteActual?.monto ??
+                pendienteActual?.montoUSD ??
+                cierre.efectivoUSD
+            )
+            : toNumber(
+                cierreOrigen.monto ??
+                cierreOrigen.montoNIO ??
+                pendienteActual?.monto ??
+                pendienteActual?.montoNIO ??
+                cierre.efectivoCS
+            );
+
+        const montoItemNIO = monedaItem === 'USD'
+            ? roundToTwo(
+                cierreOrigen.montoNIO ??
+                pendienteActual?.montoNIO ??
+                (montoMoneda * getTipoCambio(cierreOrigen.tipoCambio || cierre.tipoCambio))
+            )
+            : roundToTwo(
+                cierreOrigen.montoNIO ??
+                pendienteActual?.montoNIO ??
+                montoMoneda
+            );
+        const montoItemUSD = monedaItem === 'USD'
+            ? roundToTwo(
+                cierreOrigen.montoUSD ??
+                pendienteActual?.montoUSD ??
+                montoMoneda
+            )
+            : 0;
+
+        if (montoMoneda <= 0) {
+            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} no tiene monto pendiente válido para depósito.`);
+        }
+
+        if (pendienteActual?.estado === 'depositado') {
+            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} ya fue depositado en ${monedaItem}.`);
+        }
+
+        if (
+            pendienteActual?.estado === 'en_transito' &&
+            pendienteActual?.depositoId &&
+            pendienteActual?.depositoId !== depositoRef.id
+        ) {
+            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} ya está incluido en otro depósito pendiente.`);
+        }
+
+        const cuentaOrigenId =
+            cierreOrigen.cuentaOrigenId ||
+            pendienteActual?.cuentaOrigenId ||
+            cierre.cuentaEfectivo?.id ||
+            null;
+        const cuentaOrigenCode =
+            cierreOrigen.cuentaOrigenCode ||
+            pendienteActual?.cuentaOrigenCode ||
+            cierre.cuentaEfectivo?.code ||
+            '';
+        const cuentaOrigenName =
+            cierreOrigen.cuentaOrigenName ||
+            pendienteActual?.cuentaOrigenName ||
+            cierre.cuentaEfectivo?.name ||
+            '';
+
+        if (!cuentaOrigenId || !cuentaOrigenCode || !cuentaOrigenName) {
+            throw new Error(`El cierre ${cierre.codigoCierre || cierre.id} no tiene una cuenta de caja origen configurada.`);
+        }
+
+        const itemNormalizado = {
+            cierreId: cierre.id,
+            cierreNumero: cierre.numeroCierre || null,
+            cierreCodigo: cierre.codigoCierre || `CIERRE-${cierre.id.slice(0, 8).toUpperCase()}`,
+            fechaCierre: cierre.fecha || '',
+            sucursalId: cierre.sucursalId || null,
+            sucursalName: cierre.sucursalName || cierre.tienda || '',
+            caja: cierre.caja || '',
+            cajero: cierre.cajero || '',
+            moneda: monedaItem,
+            monto: roundToTwo(montoMoneda),
+            montoNIO: montoItemNIO,
+            montoUSD: montoItemUSD,
+            tipoCambio: getTipoCambio(cierreOrigen.tipoCambio || cierre.tipoCambio),
+            cuentaOrigenId,
+            cuentaOrigenCode,
+            cuentaOrigenName
+        };
+
+        cierresNormalizados.push(itemNormalizado);
+        cuentasOrigen.push({
+            accountId: cuentaOrigenId,
+            accountCode: cuentaOrigenCode,
+            accountName: cuentaOrigenName,
+            monto: itemNormalizado.monto,
+            montoNIO: montoItemNIO,
+            montoUSD: montoItemUSD,
+            cierreId: cierre.id,
+            cierreCodigo: itemNormalizado.cierreCodigo
         });
-        
-        // Crédito a la cuenta de origen
-        movimientos.push({
-            cuentaId: cuenta.accountId,
-            cuentaCode: cuenta.accountCode,
-            cuentaName: cuenta.accountName,
-            tipo: 'CREDITO',
-            monto: cuenta.monto,
-            montoUSD: moneda === 'USD' ? cuenta.monto : 0,
-            descripcion: `Salida para depósito en tránsito`
+        totalMoneda += itemNormalizado.monto;
+        totalNIO += montoItemNIO;
+        totalUSD += montoItemUSD;
+
+        batch.update(cierreRef, {
+            [`depositoPendiente.${currencyKey}.estado`]: 'en_transito',
+            [`depositoPendiente.${currencyKey}.depositoId`]: depositoRef.id,
+            [`depositoPendiente.${currencyKey}.depositoNumero`]: numero,
+            [`depositoPendiente.${currencyKey}.reservadoAt`]: timestamp,
+            [`depositoPendiente.${currencyKey}.bancoDestinoId`]: bancoData.id,
+            [`depositoPendiente.${currencyKey}.bancoDestinoCode`]: bancoData.code,
+            [`depositoPendiente.${currencyKey}.bancoDestinoName`]: bancoData.name,
+            updatedAt: timestamp
         });
     }
 
-    // Registrar asiento contable
-    const entry = await registerAccountingEntry({
-        fecha,
-        descripcion: `Depósito en Tránsito #${numero} - ${responsable}`,
-        referencia: `DEP-TRANS-${numero}`,
-        documentoId: depositoRef.id,
-        documentoTipo: DOCUMENT_TYPES.DEPOSITO,
-        moduloOrigen: 'depositoTransito',
-        sucursalId,
-        sucursalName,
-        userId,
-        userEmail,
-        movimientos,
-        metadata: { numero, responsable, moneda, total, sucursalId, sucursalName }
-    });
+    const uniqueBranchIds = [...new Set(cierresNormalizados.map((item) => item.sucursalId).filter(Boolean))];
+    const uniqueBranchNames = [...new Set(cierresNormalizados.map((item) => item.sucursalName).filter(Boolean))];
 
-    // Crear el depósito
     const deposito = {
         documentoId: depositoRef.id,
         numero,
         fecha,
-        sucursalId,
-        sucursalName,
         responsable,
-        moneda,
+        moneda: monedaDeposito,
+        total: roundToTwo(totalMoneda),
+        totalNIO: roundToTwo(totalNIO),
+        totalUSD: roundToTwo(totalUSD),
+        bancoDestinoId: bancoData.id,
+        bancoDestinoCode: bancoData.code,
+        bancoDestinoName: bancoData.name,
+        sucursalId: uniqueBranchIds.length === 1 ? uniqueBranchIds[0] : null,
+        sucursalName: uniqueBranchNames.length === 1 ? uniqueBranchNames[0] : uniqueBranchNames.join(', '),
+        cierresOrigen: cierresNormalizados,
         cuentasOrigen,
-        total,
         observaciones,
         estado: 'pendiente',
-        movimientosContablesIds: entry.movimientos.map(m => m.id),
-        asientoId: entry.asientoId,
-        createdAt: Timestamp.now(),
+        etapa: 'standby',
+        movimientosContablesIds: [],
+        asientoId: null,
+        createdAt: timestamp,
         createdBy: userId,
         createdByEmail: userEmail
     };
 
-    await setDoc(depositoRef, deposito);
+    batch.set(depositoRef, deposito);
+    await batch.commit();
     return { id: depositoRef.id, ...deposito };
 };
 
@@ -1231,48 +1433,75 @@ export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData)
         throw new Error('Este depósito ya fue confirmado');
     }
 
-    // Buscar cuentas
-    const transitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
-    const bancoAccount = await getDoc(doc(db, 'planCuentas', bancoDestinoId));
-    
-    if (!transitoAccount) {
-        throw new Error('No se encontró la cuenta de Dinero en Tránsito');
+    const bancoIdFinal = bancoDestinoId || deposito.bancoDestinoId;
+    if (!bancoIdFinal) {
+        throw new Error('Debe indicar la cuenta bancaria destino para confirmar el depósito.');
     }
-    
+
+    const bancoAccount = await getDoc(doc(db, 'planCuentas', bancoIdFinal));
     if (!bancoAccount.exists()) {
         throw new Error('Cuenta bancaria destino no encontrada');
     }
     
-    const bancoData = { id: bancoAccount.id, ...bancoAccount.data() };
+    const bancoData = {
+        id: bancoAccount.id,
+        ...bancoAccount.data(),
+        code: bancoDestinoCode || deposito.bancoDestinoCode || bancoAccount.data()?.code,
+        name: bancoDestinoName || deposito.bancoDestinoName || bancoAccount.data()?.name
+    };
 
-    // Crear movimientos de confirmación
-    const movimientos = [];
-    
-    for (const cuenta of deposito.cuentasOrigen) {
-        // Débito al banco destino
-        movimientos.push({
+    const sourceItems = Array.isArray(deposito.cierresOrigen) && deposito.cierresOrigen.length > 0
+        ? deposito.cierresOrigen
+        : (deposito.cuentasOrigen || []).map((cuenta) => ({
+            cierreId: cuenta.cierreId || null,
+            cierreCodigo: cuenta.cierreCodigo || null,
+            moneda: deposito.moneda || 'NIO',
+            monto: toNumber(cuenta.monto),
+            montoNIO: deposito.moneda === 'USD'
+                ? roundToTwo(toNumber(cuenta.monto) * getTipoCambio(deposito.tipoCambio))
+                : toNumber(cuenta.monto),
+            montoUSD: deposito.moneda === 'USD' ? toNumber(cuenta.monto) : 0,
+            cuentaOrigenId: cuenta.accountId,
+            cuentaOrigenCode: cuenta.accountCode,
+            cuentaOrigenName: cuenta.accountName
+        }));
+
+    if (sourceItems.length === 0) {
+        throw new Error('Este depósito no tiene montos origen para confirmar.');
+    }
+
+    const totalDebitoNIO = sourceItems.reduce((sum, item) => sum + toNumber(item.montoNIO), 0);
+    const totalDebitoUSD = sourceItems.reduce((sum, item) => sum + toNumber(item.montoUSD), 0);
+    const movimientos = [
+        {
             cuentaId: bancoData.id,
             cuentaCode: bancoData.code,
             cuentaName: bancoData.name,
             tipo: 'DEBITO',
-            monto: cuenta.monto,
-            montoUSD: deposito.moneda === 'USD' ? cuenta.monto : 0,
-            descripcion: `Depósito confirmado - Ref: ${referenciaBancaria}`
-        });
-        
-        // Crédito a Dinero en Tránsito (liberación)
+            monto: roundToTwo(totalDebitoNIO),
+            montoUSD: roundToTwo(totalDebitoUSD),
+            descripcion: `Depósito bancario confirmado #${deposito.numero}`
+        }
+    ];
+
+    for (const item of sourceItems) {
+        const montoNIO = toNumber(item.montoNIO);
+        const montoUSD = toNumber(item.montoUSD);
+        if (montoNIO <= 0 && montoUSD <= 0) continue;
+
         movimientos.push({
-            cuentaId: transitoAccount.id,
-            cuentaCode: transitoAccount.code,
-            cuentaName: transitoAccount.name,
+            cuentaId: item.cuentaOrigenId,
+            cuentaCode: item.cuentaOrigenCode,
+            cuentaName: item.cuentaOrigenName,
             tipo: 'CREDITO',
-            monto: cuenta.monto,
-            montoUSD: deposito.moneda === 'USD' ? cuenta.monto : 0,
-            descripcion: `Liberación de depósito en tránsito #${deposito.numero}`
+            monto: roundToTwo(montoNIO),
+            montoUSD: roundToTwo(montoUSD),
+            descripcion: item.cierreCodigo
+                ? `Salida de caja por depósito del cierre ${item.cierreCodigo}`
+                : `Salida de caja por depósito confirmado #${deposito.numero}`
         });
     }
 
-    // Registrar asiento contable
     const entry = await registerAccountingEntry({
         fecha: fechaDeposito,
         descripcion: `Confirmación Depósito #${deposito.numero} - ${bancoData.name}`,
@@ -1291,20 +1520,23 @@ export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData)
             referenciaBancaria,
             fechaDeposito,
             horaDeposito,
+            tipoProceso: 'confirmacionDepositoBancario',
             sucursalId: deposito.sucursalId || null,
             sucursalName: deposito.sucursalName || null
         }
     });
 
-    // Actualizar el depósito
+    const confirmationTimestamp = Timestamp.now();
+    const batch = writeBatch(db);
     const updateData = {
         estado: 'confirmado',
-        confirmadoAt: Timestamp.now(),
+        etapa: 'depositado',
+        confirmadoAt: confirmationTimestamp,
         confirmadoBy: userId,
         confirmadoByEmail: userEmail,
-        bancoDestinoId,
-        bancoDestinoCode,
-        bancoDestinoName,
+        bancoDestinoId: bancoData.id,
+        bancoDestinoCode: bancoData.code,
+        bancoDestinoName: bancoData.name,
         fechaDeposito,
         horaDeposito,
         referenciaBancaria,
@@ -1318,7 +1550,31 @@ export const confirmarDepositoBancarioERP = async (depositoId, confirmacionData)
         updateData.comprobanteURL = comprobanteURL;
     }
     
-    await updateDoc(depositoRef, updateData);
+    batch.update(depositoRef, updateData);
+
+    for (const item of sourceItems) {
+        if (!item.cierreId) continue;
+
+        const cierreRef = doc(db, 'cierresCajaERP', item.cierreId);
+        const currencyKey = String(item.moneda || deposito.moneda || 'NIO').toUpperCase() === 'USD' ? 'usd' : 'nio';
+
+        batch.update(cierreRef, {
+            [`depositoPendiente.${currencyKey}.estado`]: 'depositado',
+            [`depositoPendiente.${currencyKey}.depositoId`]: depositoId,
+            [`depositoPendiente.${currencyKey}.depositoNumero`]: deposito.numero,
+            [`depositoPendiente.${currencyKey}.monto`]: 0,
+            [`depositoPendiente.${currencyKey}.montoNIO`]: 0,
+            [`depositoPendiente.${currencyKey}.montoUSD`]: 0,
+            [`depositoPendiente.${currencyKey}.confirmadoAt`]: confirmationTimestamp,
+            [`depositoPendiente.${currencyKey}.referenciaBancaria`]: referenciaBancaria,
+            [`depositoPendiente.${currencyKey}.bancoDestinoId`]: bancoData.id,
+            [`depositoPendiente.${currencyKey}.bancoDestinoCode`]: bancoData.code,
+            [`depositoPendiente.${currencyKey}.bancoDestinoName`]: bancoData.name,
+            updatedAt: confirmationTimestamp
+        });
+    }
+
+    await batch.commit();
 
     return { success: true };
 };

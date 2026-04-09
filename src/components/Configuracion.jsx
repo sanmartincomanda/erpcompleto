@@ -8,6 +8,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { initPlanCuentasDGI, checkPlanCuentasExists } from '../utils/initPlanCuentas';
 import { resetERPDatabase } from '../services/unifiedAccountingService';
+import { getBranchIsActive, normalizeBranch } from '../utils/branches';
 import { 
     Settings, Building2, DollarSign, Link2, BookOpen,
     Plus, Edit2, Trash2, Save, RefreshCw, CheckCircle, AlertCircle,
@@ -84,7 +85,8 @@ const Configuracion = () => {
         code: '',
         address: '',
         phone: '',
-        active: true
+        active: true,
+        isActive: true
     });
     const [editingSucursal, setEditingSucursal] = useState(null);
     const [savingSucursal, setSavingSucursal] = useState(false);
@@ -160,7 +162,11 @@ const Configuracion = () => {
     useEffect(() => {
         const q = query(collection(db, 'branches'), orderBy('name'));
         const unsubscribe = onSnapshot(q, (snapshot) => {
-            setSucursales(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+            setSucursales(
+                snapshot.docs
+                    .map((d) => normalizeBranch({ id: d.id, ...d.data() }))
+                    .sort((left, right) => (left.name || '').localeCompare(right.name || ''))
+            );
         }, (err) => {
             console.error('Error cargando sucursales:', err);
         });
@@ -200,22 +206,30 @@ const Configuracion = () => {
     const handleSucursalSubmit = async (e) => {
         e.preventDefault();
         setSavingSucursal(true);
+        const isActive = getBranchIsActive(sucursalForm);
+        const sucursalPayload = {
+            ...sucursalForm,
+            name: String(sucursalForm.name || '').trim(),
+            code: String(sucursalForm.code || '').trim(),
+            active: isActive,
+            isActive
+        };
         try {
             if (editingSucursal) {
                 await updateDoc(doc(db, 'branches', editingSucursal), {
-                    ...sucursalForm,
+                    ...sucursalPayload,
                     updatedAt: new Date()
                 });
                 showMessage('Sucursal actualizada', 'success');
             } else {
                 await addDoc(collection(db, 'branches'), {
-                    ...sucursalForm,
+                    ...sucursalPayload,
                     createdAt: new Date(),
                     updatedAt: new Date()
                 });
                 showMessage('Sucursal creada', 'success');
             }
-            setSucursalForm({ name: '', code: '', address: '', phone: '', active: true });
+            setSucursalForm({ name: '', code: '', address: '', phone: '', active: true, isActive: true });
             setEditingSucursal(null);
         } catch (err) {
             showMessage('Error: ' + err.message, 'error');
@@ -716,7 +730,7 @@ const Configuracion = () => {
                         {editingSucursal && (
                             <button
                                 type="button"
-                                onClick={() => { setEditingSucursal(null); setSucursalForm({ name: '', code: '', address: '', phone: '', active: true }); }}
+                                onClick={() => { setEditingSucursal(null); setSucursalForm({ name: '', code: '', address: '', phone: '', active: true, isActive: true }); }}
                                 className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50"
                             >
                                 Cancelar
@@ -756,14 +770,24 @@ const Configuracion = () => {
                                 <td className="px-4 py-3 text-slate-600">{s.address || '-'}</td>
                                 <td className="px-4 py-3">{s.phone || '-'}</td>
                                 <td className="px-4 py-3 text-center">
-                                    <span className={`px-2 py-1 rounded-full text-xs ${s.active !== false ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                                        {s.active !== false ? 'Activa' : 'Inactiva'}
+                                    <span className={`px-2 py-1 rounded-full text-xs ${getBranchIsActive(s) ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                                        {getBranchIsActive(s) ? 'Activa' : 'Inactiva'}
                                     </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
                                     <div className="flex items-center justify-center gap-2">
                                         <button
-                                            onClick={() => { setEditingSucursal(s.id); setSucursalForm(s); }}
+                                            onClick={() => {
+                                                setEditingSucursal(s.id);
+                                                setSucursalForm({
+                                                    name: s.name || '',
+                                                    code: s.code || '',
+                                                    address: s.address || '',
+                                                    phone: s.phone || '',
+                                                    active: getBranchIsActive(s),
+                                                    isActive: getBranchIsActive(s)
+                                                });
+                                            }}
                                             className="p-1 text-blue-600 hover:bg-blue-50 rounded"
                                         >
                                             <Edit2 className="w-4 h-4" />

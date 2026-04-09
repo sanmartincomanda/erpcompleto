@@ -2,6 +2,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
+import { normalizeBranch } from '../utils/branches';
 
 const BranchesContext = createContext();
 
@@ -20,10 +21,12 @@ export const BranchesProvider = ({ children }) => {
     useEffect(() => {
         const branchesRef = collection(db, 'branches');
         const unsubscribe = onSnapshot(branchesRef, (snapshot) => {
-            const data = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data()
-            }));
+            const data = snapshot.docs
+                .map(doc => normalizeBranch({
+                    id: doc.id,
+                    ...doc.data()
+                }))
+                .sort((left, right) => (left.name || '').localeCompare(right.name || ''));
             setBranches(data);
             setLoading(false);
         }, (err) => {

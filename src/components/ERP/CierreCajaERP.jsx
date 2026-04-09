@@ -101,6 +101,14 @@ const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const sanitizeStorageFileName = (fileName = 'foto.jpg') =>
     fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
 
+const getDisplayCierreCode = (cierre) => {
+    if (cierre?.codigoCierre) return cierre.codigoCierre;
+    if (cierre?.numeroCierre) {
+        return `CC-${String(Number(cierre.numeroCierre) || 0).padStart(6, '0')}`;
+    }
+    return `CIERRE-${String(cierre?.id || '').slice(0, 8).toUpperCase()}`;
+};
+
 const CierreCajaERP = () => {
     const { user } = useAuth();
     const { branches } = useBranches();
@@ -621,6 +629,7 @@ const CierreCajaERP = () => {
             setSuccess('Cierre de caja procesado exitosamente');
             setProcessedNotice({
                 id: cierreCreado.id,
+                codigo: getDisplayCierreCode(cierreCreado),
                 fecha: formData.fecha,
                 tienda: formData.sucursalName || formData.tienda || '',
                 caja: formData.caja,
@@ -631,7 +640,7 @@ const CierreCajaERP = () => {
             console.error('Error cerrando cierre:', err);
             await loadCierres();
             const detalle = cierreCreado?.id
-                ? ` Revise el cierre ${cierreCreado.id.slice(0, 8).toUpperCase()} antes de intentarlo de nuevo.`
+                ? ` Revise el cierre ${getDisplayCierreCode(cierreCreado)} antes de intentarlo de nuevo.`
                 : '';
             setError((err.message || 'Error al cerrar el cierre') + detalle);
         } finally {
@@ -1528,6 +1537,9 @@ const CierreCajaERP = () => {
                                             <Lock className="w-3 h-3" />
                                             {cierre.estado === 'completado' ? 'Completado' : 'Cerrado'}
                                         </span>
+                                        <span className="bg-slate-100 text-slate-800 px-3 py-1 rounded-full text-sm font-semibold">
+                                            {getDisplayCierreCode(cierre)}
+                                        </span>
                                         <span className="text-gray-500">
                                             {cierre.fecha}
                                         </span>
@@ -1605,7 +1617,7 @@ const CierreCajaERP = () => {
                         <div className="flex items-center justify-between">
                             <h2 className="text-xl font-bold flex items-center gap-2">
                                 <Lock className="w-6 h-6 text-green-600" />
-                                Cierre de Caja - Modo Lectura
+                                Cierre de Caja - {getDisplayCierreCode(cierre)}
                             </h2>
                             <div className="flex gap-2">
                                 <button
@@ -1629,7 +1641,11 @@ const CierreCajaERP = () => {
                         {/* Información General */}
                         <div className="bg-gray-50 rounded-lg p-4">
                             <h3 className="font-semibold mb-3">Información General</h3>
-                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                                <div>
+                                    <p className="text-sm text-gray-500">Código</p>
+                                    <p className="font-medium">{getDisplayCierreCode(cierre)}</p>
+                                </div>
                                 <div>
                                     <p className="text-sm text-gray-500">Fecha</p>
                                     <p className="font-medium">{cierre.fecha}</p>
@@ -1921,6 +1937,10 @@ const CierreCajaERP = () => {
                         </p>
 
                         <div className="mt-6 bg-gray-50 rounded-xl p-4 text-left space-y-2">
+                            <div className="flex justify-between gap-4">
+                                <span className="text-sm text-gray-500">Código</span>
+                                <span className="font-medium text-right">{processedNotice.codigo || '-'}</span>
+                            </div>
                             <div className="flex justify-between gap-4">
                                 <span className="text-sm text-gray-500">Sucursal</span>
                                 <span className="font-medium text-right">{processedNotice.tienda || '-'}</span>

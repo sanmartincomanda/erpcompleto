@@ -28,6 +28,12 @@ const createInitialConfirmForm = () => ({
     comentarios: ''
 });
 
+const revokePreviewUrl = (url) => {
+    if (url?.startsWith('blob:')) {
+        URL.revokeObjectURL(url);
+    }
+};
+
 const ConfirmacionDeposito = () => {
     const { user } = useAuth();
     const { getBancoAccounts } = usePlanCuentas();
@@ -102,12 +108,11 @@ const ConfirmacionDeposito = () => {
     }, [depositos]);
 
     useEffect(() => () => {
-        if (previewUrl?.startsWith('blob:')) {
-            URL.revokeObjectURL(previewUrl);
-        }
+        revokePreviewUrl(previewUrl);
     }, [previewUrl]);
 
     const resetSelectedImage = () => {
+        revokePreviewUrl(previewUrl);
         setSelectedFile(null);
         setPreviewUrl(null);
         if (fileInputRef.current) {
@@ -125,8 +130,9 @@ const ConfirmacionDeposito = () => {
 
     const handleConfirmar = async (e) => {
         e.preventDefault();
-        if (!confirmForm.bancoDestinoId) {
-            setError('Debe seleccionar un banco destino');
+        const bancoDestinoIdFinal = confirmForm.bancoDestinoId || selectedDeposito?.bancoDestinoId;
+        if (!bancoDestinoIdFinal) {
+            setError('Debe indicar el banco destino del depósito');
             return;
         }
         
@@ -140,12 +146,12 @@ const ConfirmacionDeposito = () => {
                 comprobanteURL = await uploadImage(selectedFile, selectedDeposito.id);
             }
             
-            const banco = cuentasBanco.find(b => b.id === confirmForm.bancoDestinoId);
+            const banco = cuentasBanco.find(b => b.id === bancoDestinoIdFinal);
             
             await confirmarDepositoBancarioERP(selectedDeposito.id, {
-                bancoDestinoId: confirmForm.bancoDestinoId,
-                bancoDestinoCode: banco?.code,
-                bancoDestinoName: banco?.name,
+                bancoDestinoId: bancoDestinoIdFinal,
+                bancoDestinoCode: banco?.code || selectedDeposito?.bancoDestinoCode,
+                bancoDestinoName: banco?.name || selectedDeposito?.bancoDestinoName,
                 fechaDeposito: confirmForm.fechaDeposito,
                 horaDeposito: confirmForm.horaDeposito,
                 referenciaBancaria: confirmForm.referenciaBancaria,
@@ -168,7 +174,10 @@ const ConfirmacionDeposito = () => {
 
     const openConfirmModal = (deposito) => {
         setSelectedDeposito(deposito);
-        setConfirmForm(createInitialConfirmForm());
+        setConfirmForm({
+            ...createInitialConfirmForm(),
+            bancoDestinoId: deposito.bancoDestinoId || ''
+        });
         resetSelectedImage();
         setShowModal(true);
         setError(null);
@@ -210,6 +219,7 @@ const ConfirmacionDeposito = () => {
             return;
         }
 
+        revokePreviewUrl(previewUrl);
         setSelectedFile(file);
         setPreviewUrl(URL.createObjectURL(file));
         setError(null);
@@ -257,6 +267,44 @@ const ConfirmacionDeposito = () => {
         return timestamp;
     };
 
+    const selectedDepositoItems = useMemo(() => {
+        if (!selectedDeposito) return [];
+
+        if (Array.isArray(selectedDeposito.cierresOrigen) && selectedDeposito.cierresOrigen.length > 0) {
+            return selectedDeposito.cierresOrigen.map((item) => ({
+                key: `${item.cierreId}_${item.moneda}`,
+                label: `${item.cierreCodigo || 'CIERRE'} · ${item.fechaCierre || '-'} · ${item.caja || 'Caja'}`,
+                subtitle: `${item.sucursalName || 'Sin sucursal'} · ${item.cajero || 'Sin cajero'}`,
+                amount: item.monto,
+                currency: item.moneda || selectedDeposito.moneda
+            }));
+        }
+
+        return (selectedDeposito.cuentasOrigen || []).map((item, index) => ({
+            key: `${selectedDeposito.id}_${index}`,
+            label: `${item.accountCode || ''} - ${item.accountName || 'Cuenta origen'}`,
+            subtitle: item.cierreCodigo ? `Cierre ${item.cierreCodigo}` : 'Cuenta origen histórica',
+            amount: item.monto,
+            currency: selectedDeposito.moneda
+        }));
+    }, [selectedDeposito]);
+
+    const bancoDestinoSeleccionado = useMemo(() => {
+        if (!selectedDeposito) return null;
+
+        const bancoId = confirmForm.bancoDestinoId || selectedDeposito.bancoDestinoId;
+        if (!bancoId) return null;
+
+        const bancoEncontrado = cuentasBanco.find((banco) => banco.id === bancoId);
+        if (bancoEncontrado) return bancoEncontrado;
+
+        return {
+            id: bancoId,
+            code: selectedDeposito.bancoDestinoCode || '',
+            name: selectedDeposito.bancoDestinoName || 'Banco destino'
+        };
+    }, [confirmForm.bancoDestinoId, cuentasBanco, selectedDeposito]);
+
     return (
         <div className="p-6 max-w-7xl mx-auto">
             {/* Header */}
@@ -268,7 +316,7 @@ const ConfirmacionDeposito = () => {
                     Confirmación de Depósitos
                 </h1>
                 <p className="text-slate-600 mt-2">
-                    Confirme los depósitos en tránsito y registre la cuenta bancaria destino
+                    Confirme los depósitos en standby con foto y referencia bancaria
                 </p>
             </div>
 
@@ -405,7 +453,7 @@ const ConfirmacionDeposito = () => {
             {/* Modal de Confirmación */}
             {showModal && selectedDeposito && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[90vh] overflow-auto">
+                    <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto">
                         <div className="p-6 border-b border-slate-200 flex items-center justify-between bg-green-50">
                             <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                                 <CheckCircle className="w-6 h-6 text-green-600" />
@@ -424,35 +472,68 @@ const ConfirmacionDeposito = () => {
                             <div className="bg-slate-50 rounded-lg p-4 space-y-2">
                                 <p className="text-sm"><strong>Responsable:</strong> {selectedDeposito.responsable}</p>
                                 <p className="text-sm"><strong>Monto:</strong> {formatCurrency(selectedDeposito.total, selectedDeposito.moneda)}</p>
-                                <p className="text-sm"><strong>Cuentas de origen:</strong></p>
-                                <ul className="ml-4 text-sm space-y-1">
-                                    {selectedDeposito.cuentasOrigen?.map((c, i) => (
-                                        <li key={i} className="text-slate-600">
-                                            {c.accountCode} - {c.accountName}: {formatCurrency(c.monto)}
-                                        </li>
-                                    ))}
-                                </ul>
+                                <p className="text-sm">
+                                    <strong>Banco definido en standby:</strong>{' '}
+                                    {bancoDestinoSeleccionado
+                                        ? `${bancoDestinoSeleccionado.code ? `${bancoDestinoSeleccionado.code} - ` : ''}${bancoDestinoSeleccionado.name}`
+                                        : 'Pendiente por elegir'}
+                                </p>
+                                <div className="pt-2">
+                                    <p className="text-sm font-medium text-slate-700">Cierres incluidos</p>
+                                    <div className="mt-2 space-y-2 max-h-48 overflow-auto pr-1">
+                                        {selectedDepositoItems.length === 0 ? (
+                                            <p className="text-sm text-slate-500">No hay cierres vinculados para mostrar.</p>
+                                        ) : (
+                                            selectedDepositoItems.map((item) => (
+                                                <div key={item.key} className="rounded-lg border border-slate-200 bg-white px-3 py-2 flex items-start justify-between gap-3">
+                                                    <div>
+                                                        <p className="text-sm font-medium text-slate-900">{item.label}</p>
+                                                        <p className="text-xs text-slate-500">{item.subtitle}</p>
+                                                    </div>
+                                                    <p className="text-sm font-semibold text-slate-900 whitespace-nowrap">
+                                                        {formatCurrency(item.amount, item.currency)}
+                                                    </p>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
                             </div>
 
-                            <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-1">
-                                    <Building2 className="w-4 h-4 inline mr-1" />
-                                    Banco Destino *
-                                </label>
-                                <select
-                                    value={confirmForm.bancoDestinoId}
-                                    onChange={(e) => setConfirmForm({...confirmForm, bancoDestinoId: e.target.value})}
-                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-green-500"
-                                    required
-                                >
-                                    <option value="">Seleccione el banco donde se depositó...</option>
-                                    {cuentasBanco.map(b => (
-                                        <option key={b.id} value={b.id}>
-                                            {b.code} - {b.name}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
+                            {selectedDeposito?.bancoDestinoId ? (
+                                <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3">
+                                    <label className="block text-sm font-medium text-green-800 mb-1">
+                                        <Building2 className="w-4 h-4 inline mr-1" />
+                                        Banco destino
+                                    </label>
+                                    <p className="text-sm text-green-900 font-medium">
+                                        {selectedDeposito.bancoDestinoCode ? `${selectedDeposito.bancoDestinoCode} - ` : ''}{selectedDeposito.bancoDestinoName}
+                                    </p>
+                                    <p className="text-xs text-green-700 mt-1">
+                                        Este banco se definió cuando el depósito fue enviado a standby.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                                        <Building2 className="w-4 h-4 inline mr-1" />
+                                        Banco Destino *
+                                    </label>
+                                    <select
+                                        value={confirmForm.bancoDestinoId}
+                                        onChange={(e) => setConfirmForm({...confirmForm, bancoDestinoId: e.target.value})}
+                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-green-500"
+                                        required
+                                    >
+                                        <option value="">Seleccione el banco donde se depositó...</option>
+                                        {cuentasBanco.map(b => (
+                                            <option key={b.id} value={b.id}>
+                                                {b.code} - {b.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
