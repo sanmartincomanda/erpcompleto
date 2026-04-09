@@ -187,6 +187,7 @@ const CierreCajaERP = () => {
     const [cierrePhotos, setCierrePhotos] = useState([]);
     const [claveFaltante, setClaveFaltante] = useState('');
     const [desgloseModal, setDesgloseModal] = useState({ field: '', rows: [] });
+    const [arqueoModalOpen, setArqueoModalOpen] = useState(false);
     const cierrePhotoInputRef = useRef(null);
     const cierrePhotosRef = useRef([]);
 
@@ -362,11 +363,11 @@ const CierreCajaERP = () => {
     // Calcular totales
     const totales = useMemo(() => calculateCierreCajaTotals(formData), [formData]);
     const arqueoTotales = useMemo(() => calculateArqueoTotals(formData), [formData]);
-    const diferenciaCajaPendiente = Math.abs(arqueoTotales.diferenciaCaja) > 0.01;
+    const diferenciaCajaPendiente = Math.abs(totales.diferencia) > 0.01;
     const requiereClaveFaltante =
-        arqueoTotales.diferenciaCaja < 0 &&
-        Math.abs(arqueoTotales.diferenciaCaja) >= 50;
-    const tipoAjusteDiferencia = arqueoTotales.diferenciaCaja < 0 ? 'faltante' : 'sobrante';
+        totales.diferencia > 0 &&
+        Math.abs(totales.diferencia) >= 50;
+    const tipoAjusteDiferencia = totales.diferencia > 0 ? 'faltante' : 'sobrante';
 
     useEffect(() => {
         if (!formData.ajusteDiferenciaCaja?.aplicado) return;
@@ -377,9 +378,9 @@ const CierreCajaERP = () => {
         const tipoActual = String(formData.ajusteDiferenciaCaja?.tipo || '');
 
         if (
-            Math.abs(montoTotalActual - Math.abs(arqueoTotales.diferenciaCaja)) > 0.01 ||
-            Math.abs(montoNIOActual - Math.abs(arqueoTotales.diferenciaNIO)) > 0.01 ||
-            Math.abs(montoUSDActual - Math.abs(arqueoTotales.diferenciaUSD)) > 0.01 ||
+            Math.abs(montoTotalActual - Math.abs(totales.diferencia)) > 0.01 ||
+            Math.abs(montoNIOActual - Math.abs(totales.diferencia)) > 0.01 ||
+            Math.abs(montoUSDActual - 0) > 0.01 ||
             tipoActual !== tipoAjusteDiferencia
         ) {
             setFormData((prev) => ({
@@ -389,9 +390,7 @@ const CierreCajaERP = () => {
             setClaveFaltante('');
         }
     }, [
-        arqueoTotales.diferenciaCaja,
-        arqueoTotales.diferenciaNIO,
-        arqueoTotales.diferenciaUSD,
+        totales.diferencia,
         formData.ajusteDiferenciaCaja?.aplicado,
         formData.ajusteDiferenciaCaja?.montoNIO,
         formData.ajusteDiferenciaCaja?.montoTotal,
@@ -504,18 +503,23 @@ const CierreCajaERP = () => {
 
     // Calcular arqueo
     const calcularArqueo = () => {
+        const totalArqueoCS = arqueoTotales.totalArqueoCS;
+        const efectivoUSDFisico = Number(arqueoTotales.efectivoUSDFisico || 0);
         setFormData(prev => ({
             ...prev,
             arqueoRealizado: true,
             ajusteDiferenciaCaja: createInitialAjusteDiferenciaCaja(),
+            efectivoCS: totalArqueoCS > 0 ? totalArqueoCS.toFixed(2) : '0',
+            efectivoUSD: efectivoUSDFisico > 0 ? efectivoUSDFisico.toFixed(2) : '0',
             arqueo: {
                 ...prev.arqueo,
-                totalArqueoCS: arqueoTotales.totalArqueoCS,
+                totalArqueoCS: totalArqueoCS,
                 totalArqueo: arqueoTotales.totalArqueo,
-                diferenciaCS: arqueoTotales.diferenciaCaja
+                diferenciaCS: 0
             }
         }));
         setClaveFaltante('');
+        setArqueoModalOpen(false);
     };
 
     // Manejar cambios en arqueo
@@ -607,11 +611,6 @@ const CierreCajaERP = () => {
     };
 
     const enviarDiferenciaCaja = () => {
-        if (!formData.arqueoRealizado) {
-            setError('Primero debe confirmar el arqueo para poder enviar la diferencia.');
-            return;
-        }
-
         if (!diferenciaCajaPendiente) {
             setError('No hay diferencia de caja pendiente para enviar.');
             return;
@@ -627,9 +626,9 @@ const CierreCajaERP = () => {
             ajusteDiferenciaCaja: {
                 aplicado: true,
                 tipo: tipoAjusteDiferencia,
-                montoNIO: Math.abs(arqueoTotales.diferenciaNIO),
-                montoUSD: Math.abs(arqueoTotales.diferenciaUSD),
-                montoTotal: Math.abs(arqueoTotales.diferenciaCaja),
+                montoNIO: Math.abs(totales.diferencia),
+                montoUSD: 0,
+                montoTotal: Math.abs(totales.diferencia),
                 requiereClave: requiereClaveFaltante,
                 autorizadoConClave: requiereClaveFaltante,
                 autorizadoAt: new Date().toISOString(),
@@ -724,14 +723,14 @@ const CierreCajaERP = () => {
     // Cerrar cierre (procesar)
     const handleCerrar = async () => {
         if (submitting) return;
-        if (!totales.estaCuadrado) {
+        if (!totales.estaCuadrado && !formData.ajusteDiferenciaCaja?.aplicado) {
             setError('No se puede cerrar: El cierre no está cuadrado. Diferencia: ' + totales.diferencia.toFixed(2));
             return;
         }
 
         if (!validarDatosSicar()) return;
         if (!validarRetenciones()) return;
-        if (formData.arqueoRealizado && diferenciaCajaPendiente && !formData.ajusteDiferenciaCaja?.aplicado) {
+        if (diferenciaCajaPendiente && !formData.ajusteDiferenciaCaja?.aplicado) {
             setError('Debe enviar la diferencia a faltante o sobrante de caja antes de procesar el cierre.');
             return;
         }
@@ -1152,7 +1151,7 @@ const CierreCajaERP = () => {
                 {/* Efectivo */}
                 <div className="mb-6">
                     <h4 className="font-medium text-gray-700 mb-3">Efectivo</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">
                                 Efectivo C$
@@ -1191,6 +1190,27 @@ const CierreCajaERP = () => {
                                 placeholder="36.50"
                                 className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
                             />
+                        </div>
+                        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 flex flex-col justify-between">
+                            <div>
+                                <p className="text-sm font-medium text-blue-900">Conteo de Efectivo</p>
+                                <p className="text-xs text-blue-700 mt-1">
+                                    Cuente billetes y monedas en una ventana emergente y aplique el resultado al efectivo del cierre.
+                                </p>
+                                {formData.arqueoRealizado && (
+                                    <div className="mt-3 text-sm text-blue-800 space-y-1">
+                                        <p>Arqueo C$: {formatCurrency(arqueoTotales.totalArqueoCS)}</p>
+                                        <p>Arqueo USD: {formatCurrency(arqueoTotales.efectivoUSDFisico, 'USD')}</p>
+                                    </div>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setArqueoModalOpen(true)}
+                                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                            >
+                                Contar efectivo
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1395,7 +1415,7 @@ const CierreCajaERP = () => {
                 )}
             </div>
 
-            {/* Arqueo */}
+            {false && (
             <div className="bg-white rounded-lg shadow p-6">
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Calculator className="w-5 h-5 text-blue-600" />
@@ -1564,6 +1584,7 @@ const CierreCajaERP = () => {
                     </>
                 )}
             </div>
+            )}
 
             {/* Resumen y Cuadre */}
             <div className="bg-white rounded-lg shadow p-6">
@@ -1625,6 +1646,50 @@ const CierreCajaERP = () => {
                         </p>
                     </div>
                 </div>
+
+                {!totales.estaCuadrado && (
+                    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                            <div>
+                                <p className="font-semibold text-amber-900">
+                                    {tipoAjusteDiferencia === 'faltante'
+                                        ? 'Enviar a Faltante de Caja'
+                                        : 'Enviar a Sobrante de Caja'}
+                                </p>
+                                <p className="text-sm text-amber-800 mt-1">
+                                    {tipoAjusteDiferencia === 'faltante'
+                                        ? 'La diferencia faltante se registrarÃ¡ en Otros Gastos Diversos.'
+                                        : 'La diferencia sobrante se registrarÃ¡ en Otros Ingresos Diversos.'}
+                                </p>
+                                {formData.ajusteDiferenciaCaja?.aplicado && (
+                                    <p className="text-sm text-green-700 mt-2 font-medium">
+                                        Diferencia enviada correctamente al ajuste de caja. Ya puede cerrar el cierre.
+                                    </p>
+                                )}
+                            </div>
+                            <div className="w-full lg:w-auto flex flex-col sm:flex-row gap-3">
+                                {requiereClaveFaltante && (
+                                    <input
+                                        type="password"
+                                        value={claveFaltante}
+                                        onChange={(e) => setClaveFaltante(e.target.value)}
+                                        placeholder='Clave secreta: afirmativo'
+                                        className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-amber-500"
+                                    />
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={enviarDiferenciaCaja}
+                                    className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700"
+                                >
+                                    {tipoAjusteDiferencia === 'faltante'
+                                        ? 'Enviar a Faltante'
+                                        : 'Enviar a Sobrante'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Observaciones */}
@@ -1746,7 +1811,7 @@ const CierreCajaERP = () => {
                 <button
                     type="button"
                     onClick={handleCerrar}
-                    disabled={submitting || !totales.estaCuadrado}
+                    disabled={submitting || (!totales.estaCuadrado && !formData.ajusteDiferenciaCaja?.aplicado)}
                     className="flex-1 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center justify-center gap-2"
                 >
                     {submitting && submitAction === 'cerrar' ? (
@@ -1762,6 +1827,141 @@ const CierreCajaERP = () => {
                     )}
                 </button>
             </div>
+
+            {arqueoModalOpen && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-auto">
+                        <div className="p-6 border-b sticky top-0 bg-white">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 className="text-xl font-bold text-gray-900">Conteo de Efectivo</h3>
+                                    <p className="text-sm text-gray-500 mt-1">
+                                        Cuente los billetes y monedas. Al confirmar, el resultado se aplicará a Efectivo C$ y Efectivo USD.
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => setArqueoModalOpen(false)}
+                                    className="px-3 py-2 rounded-lg text-gray-500 hover:bg-gray-100"
+                                >
+                                    <XCircle className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 100</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes100}
+                                        onChange={(e) => handleArqueoChange('billetes100', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 50</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes50}
+                                        onChange={(e) => handleArqueoChange('billetes50', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 20</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes20}
+                                        onChange={(e) => handleArqueoChange('billetes20', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 10</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes10}
+                                        onChange={(e) => handleArqueoChange('billetes10', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 5</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes5}
+                                        onChange={(e) => handleArqueoChange('billetes5', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Billetes de 1</label>
+                                    <input
+                                        type="number"
+                                        value={formData.arqueo.billetes1}
+                                        onChange={(e) => handleArqueoChange('billetes1', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Monedas</label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        value={formData.arqueo.monedas}
+                                        onChange={(e) => handleArqueoChange('monedas', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Efectivo USD Físico</label>
+                                    <input
+                                        type="number"
+                                        step="0.01"
+                                        value={formData.arqueo.efectivoUSDFisico}
+                                        onChange={(e) => handleArqueoChange('efectivoUSDFisico', e.target.value)}
+                                        className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="rounded-xl bg-slate-50 border p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <p className="text-sm text-gray-500">Arqueo C$</p>
+                                    <p className="text-xl font-bold text-slate-900">{formatCurrency(arqueoTotales.totalArqueoCS)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500">Arqueo USD</p>
+                                    <p className="text-xl font-bold text-slate-900">{formatCurrency(arqueoTotales.efectivoUSDFisico, 'USD')}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500">Total contado</p>
+                                    <p className="text-xl font-bold text-slate-900">{formatCurrency(arqueoTotales.totalArqueo)}</p>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={() => setArqueoModalOpen(false)}
+                                    className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={calcularArqueo}
+                                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                                >
+                                    Aplicar al efectivo
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {desgloseModal.field && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">

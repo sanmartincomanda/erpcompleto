@@ -583,10 +583,13 @@ export const createCierreCajaERP = async (cierreData) => {
         : null;
     const ajusteDiferenciaCajaNormalizado = {
         aplicado: Boolean(ajusteDiferenciaCaja?.aplicado),
-        tipo: String(ajusteDiferenciaCaja?.tipo || '').toLowerCase(),
-        montoNIO: roundToTwo(ajusteDiferenciaCaja?.montoNIO ?? Math.abs(arqueoTotals?.diferenciaNIO || 0)),
-        montoUSD: roundToTwo(ajusteDiferenciaCaja?.montoUSD ?? Math.abs(arqueoTotals?.diferenciaUSD || 0)),
-        montoTotal: roundToTwo(ajusteDiferenciaCaja?.montoTotal ?? Math.abs(arqueoTotals?.diferenciaCaja || 0)),
+        tipo: String(
+            ajusteDiferenciaCaja?.tipo ||
+            (cierreTotals.diferencia > 0 ? 'faltante' : cierreTotals.diferencia < 0 ? 'sobrante' : '')
+        ).toLowerCase(),
+        montoNIO: roundToTwo(ajusteDiferenciaCaja?.montoNIO ?? Math.abs(cierreTotals.diferencia || 0)),
+        montoUSD: roundToTwo(ajusteDiferenciaCaja?.montoUSD ?? 0),
+        montoTotal: roundToTwo(ajusteDiferenciaCaja?.montoTotal ?? Math.abs(cierreTotals.diferencia || 0)),
         requiereClave: Boolean(ajusteDiferenciaCaja?.requiereClave),
         autorizadoConClave: Boolean(ajusteDiferenciaCaja?.autorizadoConClave),
         autorizadoBy: ajusteDiferenciaCaja?.autorizadoBy || userEmail || '',
@@ -1047,6 +1050,43 @@ export const procesarCierreCajaERP = async (cierreId, userId, userEmail) => {
             montoUSD: 0,
             descripcion: 'Abonos aplicados a cuentas por cobrar'
         });
+    }
+
+    const diferenciaCuadre = roundToTwo(toNumber(cierre.cuadre?.diferencia ?? cierreTotals.diferencia));
+
+    if (Math.abs(diferenciaCuadre) > 0.01) {
+        if (!cierre.ajusteDiferenciaCaja?.aplicado) {
+            throw new Error('Debe enviar la diferencia final del cierre a faltante o sobrante antes de procesarlo.');
+        }
+
+        const otrosGastosDiversosAccount =
+            await getCuentaByCode(CUENTAS_DGI.OTROS_GASTOS_DIVERSOS) ||
+            await getCuentaByCode(CUENTAS_DGI.GASTOS_EXTRAORDINARIOS);
+        const otrosIngresosDiversosAccount = await getCuentaByCode(CUENTAS_DGI.OTROS_INGRESOS_DIVERSOS);
+
+        if (diferenciaCuadre > 0.01 && otrosGastosDiversosAccount) {
+            agregarMovimiento({
+                cuentaId: otrosGastosDiversosAccount.id,
+                cuentaCode: otrosGastosDiversosAccount.code,
+                cuentaName: otrosGastosDiversosAccount.name,
+                tipo: 'DEBITO',
+                monto: diferenciaCuadre,
+                montoUSD: 0,
+                descripcion: 'Faltante de caja para cuadrar cierre SICAR'
+            });
+        }
+
+        if (diferenciaCuadre < -0.01 && otrosIngresosDiversosAccount) {
+            agregarMovimiento({
+                cuentaId: otrosIngresosDiversosAccount.id,
+                cuentaCode: otrosIngresosDiversosAccount.code,
+                cuentaName: otrosIngresosDiversosAccount.name,
+                tipo: 'CREDITO',
+                monto: Math.abs(diferenciaCuadre),
+                montoUSD: 0,
+                descripcion: 'Sobrante de caja para cuadrar cierre SICAR'
+            });
+        }
     }
 
     if (movimientosCierre.length > 0) {
