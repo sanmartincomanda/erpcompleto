@@ -136,12 +136,17 @@ const AccountsPayable = () => {
         let f = facturas;
         if (proveedorSeleccionado) f = f.filter(x => x.proveedorId === proveedorSeleccionado);
         if (searchTerm) f = f.filter(x => x.numeroFactura?.toLowerCase().includes(searchTerm.toLowerCase()));
-        if (filtroEstado) f = f.filter(x => x.estado === filtroEstado);
+        if (filtroEstado === 'conSaldo') {
+            f = f.filter((factura) => Number(factura.saldoPendiente || factura.monto || 0) > 0.01);
+        } else if (filtroEstado) {
+            f = f.filter(x => x.estado === filtroEstado);
+        }
         return f;
     }, [facturas, proveedorSeleccionado, searchTerm, filtroEstado]);
 
     const getTotalesProveedor = (pid) => {
         const fp = facturas.filter(f => f.proveedorId === pid);
+        const fpPendientes = fp.filter((factura) => Number(factura.saldoPendiente || factura.monto || 0) > 0.01);
         const pagosProveedor = abonos.filter(a => a.proveedorId === pid && a.estado !== 'anulado');
         const tf = fp.reduce((s, f) => s + Number(f.monto || 0), 0);
         const ta = fp.reduce((s, f) => s + Number(f.montoAbonado || 0), 0);
@@ -151,7 +156,8 @@ const AccountsPayable = () => {
             totalAbonado: ta,
             totalPagos: tp,
             saldoPendiente: tf - ta,
-            cantidadFacturas: fp.length
+            cantidadFacturas: fp.length,
+            cantidadFacturasPendientes: fpPendientes.length
         };
     };
 
@@ -604,6 +610,7 @@ const AccountsPayable = () => {
                         <label className="block text-sm font-medium text-slate-700 mb-1"><Filter className="w-4 h-4 inline mr-1" />Estado</label>
                         <select value={filtroEstado} onChange={(e) => setFiltroEstado(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
                             <option value="">Todos</option>
+                            <option value="conSaldo">Parcial + Pendientes</option>
                             <option value="pendiente">Pendiente</option>
                             <option value="parcial">Parcial</option>
                             <option value="pagada">Pagada</option>
@@ -615,7 +622,7 @@ const AccountsPayable = () => {
                         <div><p className="text-slate-500">Límite</p><p className="font-medium">{formatCurrency(proveedorActual.limiteCredito)}</p></div>
                         <div><p className="text-slate-500">Plazo</p><p className="font-medium">{proveedorActual.plazoDias} días</p></div>
                         <div><p className="text-slate-500">Saldo</p><p className="font-medium text-red-600">{formatCurrency(getTotalesProveedor(proveedorActual.id).saldoPendiente)}</p></div>
-                        <div><p className="text-slate-500">Facturas</p><p className="font-medium">{getTotalesProveedor(proveedorActual.id).cantidadFacturas}</p></div>
+                        <div><p className="text-slate-500">Facturas pendientes</p><p className="font-medium">{getTotalesProveedor(proveedorActual.id).cantidadFacturasPendientes}</p></div>
                     </div>
                 )}
             </div>

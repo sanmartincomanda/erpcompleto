@@ -11,7 +11,9 @@ import {
     PieChart,
     Building2,
     ChevronDown,
-    ChevronUp
+    ChevronUp,
+    Eye,
+    X
 } from 'lucide-react';
 import { format, startOfMonth, endOfMonth } from 'date-fns';
 import { useBranches } from '../hooks/useBranches';
@@ -78,6 +80,7 @@ const Reports = () => {
     const [movimientos, setMovimientos] = useState([]);
     const [detalleGastosOperativos, setDetalleGastosOperativos] = useState([]);
     const [mostrarDetalleGastos, setMostrarDetalleGastos] = useState(false);
+    const [cuentaGastoDetalle, setCuentaGastoDetalle] = useState(null);
 
     useEffect(() => {
         loadData();
@@ -210,6 +213,37 @@ const Reports = () => {
         })}`;
     };
 
+    const gastosOperativosAgrupados = useMemo(() => {
+        const groups = new Map();
+
+        detalleGastosOperativos.forEach((gasto) => {
+            const groupKey = `${gasto.accountCode || ''}__${gasto.accountName || ''}`;
+            const currentGroup = groups.get(groupKey) || {
+                id: groupKey,
+                accountCode: gasto.accountCode || '',
+                accountName: gasto.accountName || 'Cuenta de gasto',
+                total: 0,
+                movimientos: []
+            };
+
+            currentGroup.total += Number(gasto.monto || 0);
+            currentGroup.movimientos.push(gasto);
+            groups.set(groupKey, currentGroup);
+        });
+
+        return Array.from(groups.values())
+            .map((group) => ({
+                ...group,
+                total: Number(group.total || 0),
+                movimientos: [...group.movimientos].sort((left, right) => {
+                    const fechaRight = String(right.fecha || '');
+                    const fechaLeft = String(left.fecha || '');
+                    return fechaRight.localeCompare(fechaLeft);
+                })
+            }))
+            .sort((left, right) => right.total - left.total);
+    }, [detalleGastosOperativos]);
+
     const renderEstadoResultados = () => (
         <div className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -264,7 +298,7 @@ const Reports = () => {
                         {mostrarDetalleGastos && (
                             <div className="pb-4">
                                 <div className="rounded-lg border border-slate-200 overflow-hidden mt-2">
-                                    {detalleGastosOperativos.length === 0 ? (
+                                    {gastosOperativosAgrupados.length === 0 ? (
                                         <div className="p-4 text-sm text-slate-500 bg-slate-50">
                                             No hay gastos operativos en el período seleccionado.
                                         </div>
@@ -272,38 +306,43 @@ const Reports = () => {
                                         <>
                                             <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
                                                 <span className="text-sm font-medium text-slate-700">
-                                                    Detalle de gastos del período
+                                                    Gastos agrupados por cuenta
                                                 </span>
                                                 <span className="text-sm text-slate-500">
-                                                    {detalleGastosOperativos.length} movimiento(s)
+                                                    {gastosOperativosAgrupados.length} cuenta(s)
                                                 </span>
                                             </div>
                                             <div className="overflow-x-auto">
                                                 <table className="w-full text-sm">
                                                     <thead className="bg-white">
                                                         <tr className="border-b border-slate-200">
-                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Fecha</th>
-                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Sucursal</th>
                                                             <th className="px-4 py-3 text-left font-medium text-slate-700">Cuenta</th>
-                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Descripción</th>
-                                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Referencia</th>
+                                                            <th className="px-4 py-3 text-center font-medium text-slate-700">Movimientos</th>
                                                             <th className="px-4 py-3 text-right font-medium text-slate-700">Monto</th>
+                                                            <th className="px-4 py-3 text-center font-medium text-slate-700">Detalle</th>
                                                         </tr>
                                                     </thead>
                                                     <tbody className="divide-y divide-slate-100">
-                                                        {detalleGastosOperativos.map((gasto) => (
-                                                            <tr key={gasto.id} className="hover:bg-slate-50">
-                                                                <td className="px-4 py-3">{gasto.fecha}</td>
-                                                                <td className="px-4 py-3">{gasto.sucursalName}</td>
+                                                        {gastosOperativosAgrupados.map((cuenta) => (
+                                                            <tr key={cuenta.id} className="hover:bg-slate-50">
                                                                 <td className="px-4 py-3">
-                                                                    <span className="font-mono text-xs">{gasto.accountCode}</span>
+                                                                    <span className="font-mono text-xs">{cuenta.accountCode}</span>
                                                                     <br />
-                                                                    <span className="text-slate-600">{gasto.accountName}</span>
+                                                                    <span className="text-slate-600">{cuenta.accountName}</span>
                                                                 </td>
-                                                                <td className="px-4 py-3">{gasto.descripcion}</td>
-                                                                <td className="px-4 py-3 font-mono">{gasto.referencia}</td>
+                                                                <td className="px-4 py-3 text-center">{cuenta.movimientos.length}</td>
                                                                 <td className="px-4 py-3 text-right font-medium text-red-600">
-                                                                    {formatCurrency(gasto.monto)}
+                                                                    {formatCurrency(cuenta.total)}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-center">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => setCuentaGastoDetalle(cuenta)}
+                                                                        className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100"
+                                                                    >
+                                                                        <Eye className="w-4 h-4" />
+                                                                        Ver gastos
+                                                                    </button>
                                                                 </td>
                                                             </tr>
                                                         ))}
@@ -533,6 +572,59 @@ const Reports = () => {
             {activeTab === 'estado' && renderEstadoResultados()}
             {activeTab === 'balance' && renderBalanceGeneral()}
             {activeTab === 'movimientos' && renderMovimientos()}
+
+            {cuentaGastoDetalle && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-xl max-w-5xl w-full max-h-[90vh] overflow-auto">
+                        <div className="p-6 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-900">
+                                    Gastos de {cuentaGastoDetalle.accountName}
+                                </h2>
+                                <p className="text-sm text-slate-500 mt-1">
+                                    {cuentaGastoDetalle.accountCode} · {cuentaGastoDetalle.movimientos.length} movimiento(s) · {formatCurrency(cuentaGastoDetalle.total)}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setCuentaGastoDetalle(null)}
+                                className="p-2 hover:bg-slate-100 rounded-lg"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50">
+                                        <tr>
+                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Fecha</th>
+                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Sucursal</th>
+                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Descripción</th>
+                                            <th className="px-4 py-3 text-left font-medium text-slate-700">Referencia</th>
+                                            <th className="px-4 py-3 text-right font-medium text-slate-700">Monto</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {cuentaGastoDetalle.movimientos.map((movimiento) => (
+                                            <tr key={movimiento.id} className="hover:bg-slate-50">
+                                                <td className="px-4 py-3">{movimiento.fecha}</td>
+                                                <td className="px-4 py-3">{movimiento.sucursalName}</td>
+                                                <td className="px-4 py-3">{movimiento.descripcion}</td>
+                                                <td className="px-4 py-3 font-mono">{movimiento.referencia}</td>
+                                                <td className="px-4 py-3 text-right font-medium text-red-600">
+                                                    {formatCurrency(movimiento.monto)}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
