@@ -159,6 +159,39 @@ const hasArqueoData = (arqueo = {}) =>
         'efectivoUSDFisico'
     ].some((field) => toNumber(arqueo?.[field]) > 0);
 
+const DESGLOSE_METODOS_PAGO_CONFIG = {
+    posBAC: 'NIO',
+    posBANPRO: 'NIO',
+    posLAFISE: 'NIO',
+    transferenciaBAC: 'NIO',
+    transferenciaBANPRO: 'NIO',
+    transferenciaLAFISE: 'NIO',
+    transferenciaBAC_USD: 'USD',
+    transferenciaLAFISE_USD: 'USD'
+};
+
+const normalizeDesgloseMetodosPago = (desgloseMontos = {}) =>
+    Object.entries(DESGLOSE_METODOS_PAGO_CONFIG).reduce((accumulator, [field, moneda]) => {
+        const items = Array.isArray(desgloseMontos?.[field]) ? desgloseMontos[field] : [];
+
+        accumulator[field] = items
+            .map((item, index) => ({
+                id: item?.id || `${field}-${index + 1}`,
+                descripcion: String(item?.descripcion || '').trim(),
+                monto: roundToTwo(toNumber(item?.monto)),
+                moneda: item?.moneda || moneda
+            }))
+            .filter((item) => item.monto > 0);
+
+        return accumulator;
+    }, {});
+
+const getDesgloseMetodoPagoTotal = (desgloseMontos = {}, field) =>
+    (desgloseMontos?.[field] || []).reduce(
+        (total, item) => total + toNumber(item?.monto),
+        0
+    );
+
 const FIRESTORE_BATCH_LIMIT = 400;
 
 const chunkItems = (items = [], chunkSize = FIRESTORE_BATCH_LIMIT) => {
@@ -490,6 +523,7 @@ export const createCierreCajaERP = async (cierreData) => {
         // Transferencias USD
         transferenciaBAC_USD,
         transferenciaLAFISE_USD,
+        desgloseMontos,
         
         // Créditos y abonos
         totalFacturasCreditoBrutas,
@@ -525,6 +559,7 @@ export const createCierreCajaERP = async (cierreData) => {
     const shouldPersistArqueo = Boolean(arqueoRealizado) || hasArqueoData(arqueo);
     const arqueoTotals = shouldPersistArqueo ? calculateArqueoTotals(cierreData) : null;
     const dineroTransitoAccount = await getCuentaByCode(CUENTAS_DGI.DINERO_TRANSITO);
+    const desgloseMetodosPago = normalizeDesgloseMetodosPago(desgloseMontos);
 
     if (cierreTotals.totalEfectivo > 0 && !dineroTransitoAccount) {
         throw new Error('No se encontro la cuenta Dinero en Transito (110104). Cargue el plan DGI antes de procesar cierres con efectivo.');
@@ -576,15 +611,16 @@ export const createCierreCajaERP = async (cierreData) => {
         efectivoUSD: Number(efectivoUSD || 0),
         tipoCambio: cierreTotals.tipoCambio,
         
-        posBAC: Number(posBAC || 0),
-        posBANPRO: Number(posBANPRO || 0),
-        posLAFISE: Number(posLAFISE || 0),
+        posBAC: Number(toNumber(posBAC) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'posBAC') || 0),
+        posBANPRO: Number(toNumber(posBANPRO) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'posBANPRO') || 0),
+        posLAFISE: Number(toNumber(posLAFISE) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'posLAFISE') || 0),
         
-        transferenciaBAC: Number(transferenciaBAC || 0),
-        transferenciaBANPRO: Number(transferenciaBANPRO || 0),
-        transferenciaLAFISE: Number(transferenciaLAFISE || 0),
-        transferenciaBAC_USD: Number(transferenciaBAC_USD || 0),
-        transferenciaLAFISE_USD: Number(transferenciaLAFISE_USD || 0),
+        transferenciaBAC: Number(toNumber(transferenciaBAC) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'transferenciaBAC') || 0),
+        transferenciaBANPRO: Number(toNumber(transferenciaBANPRO) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'transferenciaBANPRO') || 0),
+        transferenciaLAFISE: Number(toNumber(transferenciaLAFISE) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'transferenciaLAFISE') || 0),
+        transferenciaBAC_USD: Number(toNumber(transferenciaBAC_USD) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'transferenciaBAC_USD') || 0),
+        transferenciaLAFISE_USD: Number(toNumber(transferenciaLAFISE_USD) || getDesgloseMetodoPagoTotal(desgloseMetodosPago, 'transferenciaLAFISE_USD') || 0),
+        desgloseMontos: desgloseMetodosPago,
         
         totalFacturasCreditoBrutas: Number(
             totalFacturasCreditoBrutas ??

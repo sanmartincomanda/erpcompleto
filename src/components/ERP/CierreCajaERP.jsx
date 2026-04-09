@@ -60,6 +60,44 @@ const createInitialAjusteDiferenciaCaja = () => ({
     autorizadoBy: ''
 });
 
+const METODO_PAGO_DESGLOSE_CONFIG = {
+    posBAC: { label: 'POS BAC', moneda: 'NIO' },
+    posBANPRO: { label: 'POS BANPRO', moneda: 'NIO' },
+    posLAFISE: { label: 'POS LAFISE', moneda: 'NIO' },
+    transferenciaBAC: { label: 'Transferencia BAC', moneda: 'NIO' },
+    transferenciaBANPRO: { label: 'Transferencia BANPRO', moneda: 'NIO' },
+    transferenciaLAFISE: { label: 'Transferencia LAFISE', moneda: 'NIO' },
+    transferenciaBAC_USD: { label: 'Transferencia BAC USD', moneda: 'USD' },
+    transferenciaLAFISE_USD: { label: 'Transferencia LAFISE USD', moneda: 'USD' }
+};
+
+const METODO_PAGO_DESGLOSE_FIELDS = Object.keys(METODO_PAGO_DESGLOSE_CONFIG);
+
+const createInitialDesgloseMontos = () =>
+    METODO_PAGO_DESGLOSE_FIELDS.reduce((accumulator, field) => {
+        accumulator[field] = [];
+        return accumulator;
+    }, {});
+
+const createDesgloseMontoDraft = (item = {}) => ({
+    id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    descripcion: item.descripcion || '',
+    monto:
+        item.monto !== undefined && item.monto !== null && item.monto !== ''
+            ? String(item.monto)
+            : ''
+});
+
+const normalizeDesgloseMontoRows = (rows = [], moneda = 'NIO') =>
+    (Array.isArray(rows) ? rows : [])
+        .map((row) => ({
+            id: row?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            descripcion: String(row?.descripcion || '').trim(),
+            monto: Number(row?.monto || 0),
+            moneda
+        }))
+        .filter((row) => row.monto > 0);
+
 const createInitialFormData = (defaultSucursal = null) => ({
     fecha: format(new Date(), 'yyyy-MM-dd'),
     sucursalId: defaultSucursal?.id || '',
@@ -85,6 +123,7 @@ const createInitialFormData = (defaultSucursal = null) => ({
     transferenciaLAFISE: '0',
     transferenciaBAC_USD: '0',
     transferenciaLAFISE_USD: '0',
+    desgloseMontos: createInitialDesgloseMontos(),
     retenciones: [],
     gastosCaja: [],
     arqueoRealizado: false,
@@ -147,6 +186,7 @@ const CierreCajaERP = () => {
     const [processedNotice, setProcessedNotice] = useState(null);
     const [cierrePhotos, setCierrePhotos] = useState([]);
     const [claveFaltante, setClaveFaltante] = useState('');
+    const [desgloseModal, setDesgloseModal] = useState({ field: '', rows: [] });
     const cierrePhotoInputRef = useRef(null);
     const cierrePhotosRef = useRef([]);
 
@@ -772,6 +812,148 @@ const CierreCajaERP = () => {
         })}`;
     };
 
+    const getDesgloseRows = (field, source = formData) =>
+        Array.isArray(source?.desgloseMontos?.[field]) ? source.desgloseMontos[field] : [];
+
+    const getDesgloseTotal = (field, source = formData) =>
+        getDesgloseRows(field, source).reduce(
+            (total, row) => total + Number(row?.monto || 0),
+            0
+        );
+
+    const handleMetodoPagoTotalChange = (field, value) => {
+        setFormData((prev) => {
+            const nextDesglose = {
+                ...(prev.desgloseMontos || createInitialDesgloseMontos())
+            };
+
+            if ((nextDesglose[field] || []).length > 0) {
+                nextDesglose[field] = [];
+            }
+
+            return {
+                ...prev,
+                [field]: value,
+                desgloseMontos: nextDesglose
+            };
+        });
+    };
+
+    const openDesgloseModal = (field) => {
+        const existingRows = getDesgloseRows(field);
+        const currentValue = String(formData[field] ?? '').trim();
+        const initialRows = existingRows.length > 0
+            ? existingRows.map((row) => createDesgloseMontoDraft(row))
+            : [
+                createDesgloseMontoDraft(
+                    Number(currentValue || 0) > 0 ? { monto: currentValue } : {}
+                )
+            ];
+
+        setDesgloseModal({ field, rows: initialRows });
+    };
+
+    const closeDesgloseModal = () => {
+        setDesgloseModal({ field: '', rows: [] });
+    };
+
+    const addDesgloseRow = () => {
+        setDesgloseModal((prev) => ({
+            ...prev,
+            rows: [...prev.rows, createDesgloseMontoDraft()]
+        }));
+    };
+
+    const updateDesgloseRow = (rowId, field, value) => {
+        setDesgloseModal((prev) => ({
+            ...prev,
+            rows: prev.rows.map((row) =>
+                row.id === rowId
+                    ? { ...row, [field]: value }
+                    : row
+            )
+        }));
+    };
+
+    const removeDesgloseRow = (rowId) => {
+        setDesgloseModal((prev) => {
+            const nextRows = prev.rows.filter((row) => row.id !== rowId);
+            return {
+                ...prev,
+                rows: nextRows.length > 0 ? nextRows : [createDesgloseMontoDraft()]
+            };
+        });
+    };
+
+    const saveDesgloseModal = () => {
+        const field = desgloseModal.field;
+        const config = METODO_PAGO_DESGLOSE_CONFIG[field];
+
+        if (!field || !config) {
+            closeDesgloseModal();
+            return;
+        }
+
+        const normalizedRows = normalizeDesgloseMontoRows(
+            desgloseModal.rows,
+            config.moneda
+        );
+        const total = normalizedRows.reduce(
+            (sum, row) => sum + Number(row?.monto || 0),
+            0
+        );
+
+        setFormData((prev) => ({
+            ...prev,
+            [field]: total > 0 ? total.toFixed(2) : '0',
+            desgloseMontos: {
+                ...(prev.desgloseMontos || createInitialDesgloseMontos()),
+                [field]: normalizedRows
+            }
+        }));
+
+        closeDesgloseModal();
+    };
+
+    const renderMetodoPagoField = (field) => {
+        const config = METODO_PAGO_DESGLOSE_CONFIG[field];
+        const rows = getDesgloseRows(field);
+        const totalDesglose = getDesgloseTotal(field);
+        const hasDesglose = rows.length > 0;
+
+        return (
+            <div key={field}>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                    {config.label}
+                </label>
+                <div className="space-y-2">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                        <input
+                            type="number"
+                            step="0.01"
+                            value={formData[field]}
+                            onChange={(e) => handleMetodoPagoTotalChange(field, e.target.value)}
+                            placeholder="0.00"
+                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => openDesgloseModal(field)}
+                            className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-50 whitespace-nowrap"
+                        >
+                            Desglosar
+                        </button>
+                    </div>
+                    <p className={`text-xs ${hasDesglose ? 'text-blue-600' : 'text-gray-500'}`}>
+                        {hasDesglose
+                            ? `${rows.length} monto${rows.length === 1 ? '' : 's'} cargado${rows.length === 1 ? '' : 's'} · Total ${formatCurrency(totalDesglose, config.moneda)}`
+                            : 'Puede digitar el total o abrir el desglose para sumar varios montos.'}
+                    </p>
+                </div>
+            </div>
+        );
+    };
+
     // Renderizar formulario de nuevo cierre
     const renderNuevoCierre = () => (
         <form onSubmit={handleGuardar} className="space-y-6">
@@ -1017,39 +1199,9 @@ const CierreCajaERP = () => {
                 <div className="mb-6">
                     <h4 className="font-medium text-gray-700 mb-3">POS</h4>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">POS BAC</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.posBAC}
-                                onChange={(e) => setFormData(prev => ({ ...prev, posBAC: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">POS BANPRO</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.posBANPRO}
-                                onChange={(e) => setFormData(prev => ({ ...prev, posBANPRO: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">POS LAFISE</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.posLAFISE}
-                                onChange={(e) => setFormData(prev => ({ ...prev, posLAFISE: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
+                        {renderMetodoPagoField('posBAC')}
+                        {renderMetodoPagoField('posBANPRO')}
+                        {renderMetodoPagoField('posLAFISE')}
                     </div>
                 </div>
 
@@ -1057,39 +1209,9 @@ const CierreCajaERP = () => {
                 <div className="mb-6">
                     <h4 className="font-medium text-gray-700 mb-3">Transferencias (Córdobas)</h4>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Transferencia BAC</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.transferenciaBAC}
-                                onChange={(e) => setFormData(prev => ({ ...prev, transferenciaBAC: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Transferencia BANPRO</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.transferenciaBANPRO}
-                                onChange={(e) => setFormData(prev => ({ ...prev, transferenciaBANPRO: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Transferencia LAFISE</label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.transferenciaLAFISE}
-                                onChange={(e) => setFormData(prev => ({ ...prev, transferenciaLAFISE: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
+                        {renderMetodoPagoField('transferenciaBAC')}
+                        {renderMetodoPagoField('transferenciaBANPRO')}
+                        {renderMetodoPagoField('transferenciaLAFISE')}
                     </div>
                 </div>
 
@@ -1100,32 +1222,8 @@ const CierreCajaERP = () => {
                         Transferencias (Dólares USD)
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Transferencia BAC USD
-                            </label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.transferenciaBAC_USD}
-                                onChange={(e) => setFormData(prev => ({ ...prev, transferenciaBAC_USD: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Transferencia LAFISE USD
-                            </label>
-                            <input
-                                type="number"
-                                step="0.01"
-                                value={formData.transferenciaLAFISE_USD}
-                                onChange={(e) => setFormData(prev => ({ ...prev, transferenciaLAFISE_USD: e.target.value }))}
-                                placeholder="0.00"
-                                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
-                            />
-                        </div>
+                        {renderMetodoPagoField('transferenciaBAC_USD')}
+                        {renderMetodoPagoField('transferenciaLAFISE_USD')}
                     </div>
                 </div>
             </div>
@@ -1664,6 +1762,113 @@ const CierreCajaERP = () => {
                     )}
                 </button>
             </div>
+
+            {desgloseModal.field && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-auto">
+                        <div className="p-6 border-b sticky top-0 bg-white">
+                            <div className="flex items-start justify-between gap-4">
+                                <div>
+                                    <h3 className="text-xl font-bold text-gray-900">
+                                        Desglose de {METODO_PAGO_DESGLOSE_CONFIG[desgloseModal.field]?.label}
+                                    </h3>
+                                    <p className="text-sm text-gray-500 mt-1">
+                                        Agregue varios montos para que el total se sume automáticamente en el cierre.
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={closeDesgloseModal}
+                                    className="px-3 py-2 rounded-lg text-gray-500 hover:bg-gray-100"
+                                >
+                                    <XCircle className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="p-6 space-y-4">
+                            {desgloseModal.rows.map((row, index) => (
+                                <div
+                                    key={row.id}
+                                    className="grid grid-cols-1 md:grid-cols-[1fr_180px_auto] gap-3 border rounded-xl p-4"
+                                >
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Referencia o detalle
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={row.descripcion}
+                                            onChange={(e) => updateDesgloseRow(row.id, 'descripcion', e.target.value)}
+                                            placeholder={`Detalle ${index + 1}`}
+                                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            Monto
+                                        </label>
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            value={row.monto}
+                                            onChange={(e) => updateDesgloseRow(row.id, 'monto', e.target.value)}
+                                            placeholder="0.00"
+                                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+                                    <div className="flex items-end">
+                                        <button
+                                            type="button"
+                                            onClick={() => removeDesgloseRow(row.id)}
+                                            className="px-3 py-2 text-red-600 hover:bg-red-50 rounded-lg"
+                                        >
+                                            <Trash2 className="w-5 h-5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+
+                            <button
+                                type="button"
+                                onClick={addDesgloseRow}
+                                className="w-full border border-dashed border-blue-300 text-blue-700 rounded-xl px-4 py-3 hover:bg-blue-50 flex items-center justify-center gap-2"
+                            >
+                                <Plus className="w-4 h-4" />
+                                Agregar otro monto
+                            </button>
+
+                            <div className="rounded-xl bg-slate-50 border p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                <div>
+                                    <p className="text-sm text-gray-500">Total del desglose</p>
+                                    <p className="text-2xl font-bold text-slate-900">
+                                        {formatCurrency(
+                                            desgloseModal.rows.reduce((sum, row) => sum + Number(row?.monto || 0), 0),
+                                            METODO_PAGO_DESGLOSE_CONFIG[desgloseModal.field]?.moneda || 'NIO'
+                                        )}
+                                    </p>
+                                </div>
+                                <div className="flex gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={closeDesgloseModal}
+                                        className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={saveDesgloseModal}
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                                    >
+                                        Guardar desglose
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </form>
     );
 
@@ -1762,6 +1967,22 @@ const CierreCajaERP = () => {
         const retenciones = cierre.retenciones || [];
         const gastosCaja = cierre.gastosCaja || [];
         const fotosCierre = viewingCierreFotos;
+        const gruposDesgloseMetodoPago = METODO_PAGO_DESGLOSE_FIELDS
+            .map((field) => {
+                const config = METODO_PAGO_DESGLOSE_CONFIG[field];
+                const rows = normalizeDesgloseMontoRows(
+                    cierre?.desgloseMontos?.[field],
+                    config.moneda
+                );
+
+                return {
+                    field,
+                    config,
+                    rows,
+                    total: rows.reduce((sum, row) => sum + Number(row?.monto || 0), 0)
+                };
+            })
+            .filter((group) => group.rows.length > 0);
         
         return (
             <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -1945,6 +2166,44 @@ const CierreCajaERP = () => {
                                                 </p>
                                             </div>
                                             <p className="font-semibold text-orange-600">{formatCurrency(gasto.monto)}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {gruposDesgloseMetodoPago.length > 0 && (
+                            <div className="bg-gray-50 rounded-lg p-4">
+                                <div className="flex items-center justify-between gap-4 mb-4">
+                                    <h3 className="font-semibold">Desglose de POS y Transferencias</h3>
+                                    <span className="text-sm text-gray-500">
+                                        {gruposDesgloseMetodoPago.length} cuenta{gruposDesgloseMetodoPago.length === 1 ? '' : 's'}
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    {gruposDesgloseMetodoPago.map((group) => (
+                                        <div key={group.field} className="bg-white border rounded-xl p-4">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <h4 className="font-semibold text-gray-900">{group.config.label}</h4>
+                                                <span className="font-semibold text-blue-700">
+                                                    {formatCurrency(group.total, group.config.moneda)}
+                                                </span>
+                                            </div>
+                                            <div className="space-y-2 mt-3">
+                                                {group.rows.map((row, index) => (
+                                                    <div
+                                                        key={row.id || `${group.field}-${index}`}
+                                                        className="flex items-center justify-between gap-3 border-b border-gray-100 last:border-b-0 pb-2 last:pb-0"
+                                                    >
+                                                        <p className="text-sm text-gray-700">
+                                                            {row.descripcion || `Monto ${index + 1}`}
+                                                        </p>
+                                                        <span className="text-sm font-medium text-gray-900">
+                                                            {formatCurrency(row.monto, group.config.moneda)}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
