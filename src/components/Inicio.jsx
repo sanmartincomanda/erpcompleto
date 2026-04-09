@@ -1,9 +1,10 @@
 // src/components/Inicio.jsx
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { 
-    BookOpen, 
-    DollarSign, 
+import { collection, onSnapshot } from 'firebase/firestore';
+import {
+    BookOpen,
+    DollarSign,
     Calculator,
     ArrowRightLeft,
     CheckCircle,
@@ -12,10 +13,269 @@ import {
     Settings,
     TrendingUp,
     TrendingDown,
-    Package
+    Package,
+    RefreshCw
 } from 'lucide-react';
+import { db } from '../firebase';
+import { useBranches } from '../hooks/useBranches';
+
+const getDateKey = (dateValue = new Date()) => {
+    const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return '';
+
+    return [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, '0'),
+        String(date.getDate()).padStart(2, '0')
+    ].join('-');
+};
+
+const toNumber = (value) => Number(value || 0);
+
+const toDateKey = (value) => {
+    if (!value) return '';
+
+    if (typeof value?.toDate === 'function') {
+        return getDateKey(value.toDate());
+    }
+
+    if (typeof value?.seconds === 'number') {
+        return getDateKey(new Date(value.seconds * 1000));
+    }
+
+    if (typeof value === 'string') {
+        const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (match) return match[1];
+    }
+
+    return getDateKey(value);
+};
+
+const normalizeCode = (value) => String(value || '').replace(/\./g, '');
+
+const isExpenseFacturaProveedor = (factura = {}) => {
+    if (['dataEntry', 'activosFijos'].includes(factura.origenModulo)) {
+        return false;
+    }
+
+    const accountType = String(factura.cuentaGastoType || '').toUpperCase();
+    if (['GASTO', 'COSTO'].includes(accountType)) {
+        return true;
+    }
+
+    const accountCode = normalizeCode(factura.cuentaGastoCode);
+    return accountCode.startsWith('61') || accountCode.startsWith('51');
+};
+
+const getClosureSalesAmount = (cierre = {}) =>
+    toNumber(
+        cierre.totalIngreso ??
+        cierre.cuadre?.totalIngreso ??
+        cierre.cuadre?.totalIngresoRegistrado
+    );
+
+const getClosureCashExpenses = (cierre = {}) => {
+    if (cierre.totalGastosCaja !== undefined) {
+        return toNumber(cierre.totalGastosCaja);
+    }
+
+    return (cierre.gastosCaja || []).reduce(
+        (sum, gasto) => sum + toNumber(gasto?.monto),
+        0
+    );
+};
+
+const formatCurrency = (amount) =>
+    `C$ ${Number(amount || 0).toLocaleString('es-NI', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    })}`;
 
 const Inicio = () => {
+    const { branches, loading: loadingBranches } = useBranches();
+    const sucursalesActivas = useMemo(
+        () => branches.filter((branch) => branch.isActive !== false),
+        [branches]
+    );
+    const [todayKey, setTodayKey] = useState(() => getDateKey());
+
+    const [stats, setStats] = useState({
+        ventasDirectasHoy: 0,
+        ventasCierresHoy: 0,
+        gastosDirectosHoy: 0,
+        gastosComprasHoy: 0,
+        gastosCxPHoy: 0,
+        gastosDiariosHoy: 0,
+        gastosCierresHoy: 0,
+        depositosPendientes: 0
+    });
+    const [loadingStats, setLoadingStats] = useState(true);
+
+    useEffect(() => {
+        const syncTodayKey = () => setTodayKey(getDateKey());
+        const intervalId = window.setInterval(syncTodayKey, 60000);
+
+        return () => window.clearInterval(intervalId);
+    }, []);
+
+    useEffect(() => {
+        const loadedKeys = new Set();
+        const markLoaded = (key) => {
+            loadedKeys.add(key);
+            if (loadedKeys.size >= 7) {
+                setLoadingStats(false);
+            }
+        };
+        const isTodayRecord = (value) => toDateKey(value) === todayKey;
+
+        const unsubVentasDirectas = onSnapshot(
+            collection(db, 'ventasDirectas'),
+            (snapshot) => {
+                const total = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    return isTodayRecord(data.fecha)
+                        ? sum + toNumber(data.monto)
+                        : sum;
+                }, 0);
+
+                setStats((prev) => ({ ...prev, ventasDirectasHoy: total }));
+                markLoaded('ventasDirectas');
+            },
+            () => markLoaded('ventasDirectas')
+        );
+
+        const unsubGastosDirectos = onSnapshot(
+            collection(db, 'gastosDirectos'),
+            (snapshot) => {
+                const total = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    return isTodayRecord(data.fecha)
+                        ? sum + toNumber(data.monto)
+                        : sum;
+                }, 0);
+
+                setStats((prev) => ({ ...prev, gastosDirectosHoy: total }));
+                markLoaded('gastosDirectos');
+            },
+            () => markLoaded('gastosDirectos')
+        );
+
+        const unsubCompras = onSnapshot(
+            collection(db, 'compras'),
+            (snapshot) => {
+                const total = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    return isTodayRecord(data.fecha)
+                        ? sum + toNumber(data.monto)
+                        : sum;
+                }, 0);
+
+                setStats((prev) => ({ ...prev, gastosComprasHoy: total }));
+                markLoaded('compras');
+            },
+            () => markLoaded('compras')
+        );
+
+        const unsubFacturasProveedor = onSnapshot(
+            collection(db, 'facturasProveedor'),
+            (snapshot) => {
+                const total = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    if (!isTodayRecord(data.fechaEmision) || !isExpenseFacturaProveedor(data)) {
+                        return sum;
+                    }
+
+                    return sum + toNumber(data.monto);
+                }, 0);
+
+                setStats((prev) => ({ ...prev, gastosCxPHoy: total }));
+                markLoaded('facturasProveedor');
+            },
+            () => markLoaded('facturasProveedor')
+        );
+
+        const unsubGastosDiarios = onSnapshot(
+            collection(db, 'gastosDiarios'),
+            (snapshot) => {
+                const total = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    return isTodayRecord(data.fecha)
+                        ? sum + toNumber(data.monto)
+                        : sum;
+                }, 0);
+
+                setStats((prev) => ({ ...prev, gastosDiariosHoy: total }));
+                markLoaded('gastosDiarios');
+            },
+            () => markLoaded('gastosDiarios')
+        );
+
+        const unsubCierres = onSnapshot(
+            collection(db, 'cierresCajaERP'),
+            (snapshot) => {
+                let ventasHoy = 0;
+                let gastosHoy = 0;
+
+                snapshot.docs.forEach((docSnapshot) => {
+                    const data = docSnapshot.data();
+                    const estado = String(data.estado || '').toLowerCase();
+                    const isProcessed = ['completado', 'cerrado'].includes(estado);
+
+                    if (!isProcessed || !isTodayRecord(data.fecha)) {
+                        return;
+                    }
+
+                    ventasHoy += getClosureSalesAmount(data);
+                    gastosHoy += getClosureCashExpenses(data);
+                });
+
+                setStats((prev) => ({
+                    ...prev,
+                    ventasCierresHoy: ventasHoy,
+                    gastosCierresHoy: gastosHoy
+                }));
+                markLoaded('cierresCajaERP');
+            },
+            () => markLoaded('cierresCajaERP')
+        );
+
+        const unsubDepositos = onSnapshot(
+            collection(db, 'depositosTransito'),
+            (snapshot) => {
+                const totalPendientes = snapshot.docs.reduce((sum, docSnapshot) => {
+                    const data = docSnapshot.data();
+                    const estado = String(data.estado || '').toLowerCase();
+                    return estado && estado !== 'confirmado' && estado !== 'anulado'
+                        ? sum + 1
+                        : sum;
+                }, 0);
+
+                setStats((prev) => ({ ...prev, depositosPendientes: totalPendientes }));
+                markLoaded('depositosTransito');
+            },
+            () => markLoaded('depositosTransito')
+        );
+
+        return () => {
+            unsubVentasDirectas();
+            unsubGastosDirectos();
+            unsubCompras();
+            unsubFacturasProveedor();
+            unsubGastosDiarios();
+            unsubCierres();
+            unsubDepositos();
+        };
+    }, [todayKey]);
+
+    const ventasHoy = stats.ventasDirectasHoy + stats.ventasCierresHoy;
+    const gastosHoy =
+        stats.gastosDirectosHoy +
+        stats.gastosComprasHoy +
+        stats.gastosCxPHoy +
+        stats.gastosDiariosHoy +
+        stats.gastosCierresHoy;
+    const cajasActivas = sucursalesActivas.length;
+
     const modules = [
         {
             title: 'Plan de Cuentas',
@@ -84,7 +344,6 @@ const Inicio = () => {
 
     return (
         <div className="p-6 max-w-7xl mx-auto">
-            {/* Welcome Section */}
             <div className="mb-8">
                 <h1 className="text-3xl font-bold text-gray-900 mb-2">
                     Bienvenido al ERP Carnessanmartin
@@ -94,13 +353,14 @@ const Inicio = () => {
                 </p>
             </div>
 
-            {/* Quick Stats */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
                 <div className="bg-white rounded-lg shadow p-4 border-l-4 border-blue-500">
                     <div className="flex items-center justify-between">
                         <div>
                             <p className="text-sm text-gray-500">Ventas Hoy</p>
-                            <p className="text-2xl font-bold text-gray-900">C$ 0.00</p>
+                            <p className="text-2xl font-bold text-gray-900">
+                                {loadingStats ? <RefreshCw className="w-6 h-6 animate-spin text-blue-500" /> : formatCurrency(ventasHoy)}
+                            </p>
                         </div>
                         <TrendingUp className="w-8 h-8 text-blue-500" />
                     </div>
@@ -109,7 +369,9 @@ const Inicio = () => {
                     <div className="flex items-center justify-between">
                         <div>
                             <p className="text-sm text-gray-500">Gastos Hoy</p>
-                            <p className="text-2xl font-bold text-gray-900">C$ 0.00</p>
+                            <p className="text-2xl font-bold text-gray-900">
+                                {loadingStats ? <RefreshCw className="w-6 h-6 animate-spin text-red-500" /> : formatCurrency(gastosHoy)}
+                            </p>
                         </div>
                         <TrendingDown className="w-8 h-8 text-red-500" />
                     </div>
@@ -118,7 +380,9 @@ const Inicio = () => {
                     <div className="flex items-center justify-between">
                         <div>
                             <p className="text-sm text-gray-500">Cajas Activas</p>
-                            <p className="text-2xl font-bold text-gray-900">4</p>
+                            <p className="text-2xl font-bold text-gray-900">
+                                {loadingBranches ? <RefreshCw className="w-6 h-6 animate-spin text-green-500" /> : cajasActivas}
+                            </p>
                         </div>
                         <Calculator className="w-8 h-8 text-green-500" />
                     </div>
@@ -127,14 +391,15 @@ const Inicio = () => {
                     <div className="flex items-center justify-between">
                         <div>
                             <p className="text-sm text-gray-500">Depósitos Pendientes</p>
-                            <p className="text-2xl font-bold text-gray-900">0</p>
+                            <p className="text-2xl font-bold text-gray-900">
+                                {loadingStats ? <RefreshCw className="w-6 h-6 animate-spin text-orange-500" /> : stats.depositosPendientes}
+                            </p>
                         </div>
                         <ArrowRightLeft className="w-8 h-8 text-orange-500" />
                     </div>
                 </div>
             </div>
 
-            {/* Modules Grid */}
             <h2 className="text-xl font-bold text-gray-900 mb-4">Módulos del Sistema</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 {modules.map((module) => {
@@ -155,12 +420,11 @@ const Inicio = () => {
                 })}
             </div>
 
-            {/* Info Section */}
             <div className="mt-8 bg-blue-50 rounded-lg p-6">
                 <h3 className="font-bold text-blue-900 mb-2">¿Necesita ayuda?</h3>
                 <p className="text-blue-700 text-sm">
-                    Este sistema está integrado con el Plan de Cuentas NIC. Todas las transacciones 
-                    generan asientos contables automáticamente. Para soporte técnico, contacte al 
+                    Este sistema está integrado con el Plan de Cuentas NIC. Todas las transacciones
+                    generan asientos contables automáticamente. Para soporte técnico, contacte al
                     administrador del sistema.
                 </p>
             </div>
