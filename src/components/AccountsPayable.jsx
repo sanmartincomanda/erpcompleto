@@ -1,21 +1,30 @@
 // src/components/AccountsPayable.jsx
 // Módulo de Cuentas por Pagar - INTEGRADO CON CONTABILIDAD
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db } from '../firebase';
 import { 
     collection, query, where, orderBy, onSnapshot, 
-    addDoc, updateDoc, deleteDoc, doc, Timestamp, getDocs
+    addDoc, updateDoc, deleteDoc, doc, Timestamp, getDocs, setDoc
 } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { useBranches } from '../hooks/useBranches';
 import { registerAccountingEntry } from '../services/unifiedAccountingService';
+import {
+    createImageAttachment,
+    createLocalImagePreviewItems,
+    revokeLocalImagePreviewItems,
+    resolveStoredImageEntries
+} from '../utils/imageAttachments';
 import { 
     Building2, Plus, Trash2, Save, X, Search, 
     DollarSign, Calendar, CheckCircle, 
     AlertCircle, RefreshCw, FileText, CheckSquare, Square, Filter,
-    TrendingDown, Landmark
+    TrendingDown, Landmark, Eye, Camera, Upload, Image
 } from 'lucide-react';
+
+const MAX_FACTURA_IMAGES = 5;
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 
 const AccountsPayable = () => {
     const { user } = useAuth();
@@ -42,6 +51,9 @@ const AccountsPayable = () => {
     const [showAbonoModal, setShowAbonoModal] = useState(false);
     const [showAbonosListModal, setShowAbonosListModal] = useState(false);
     const [facturaSeleccionadaParaAbonos, setFacturaSeleccionadaParaAbonos] = useState(null);
+    const [facturaDetalle, setFacturaDetalle] = useState(null);
+    const [facturaDetalleAdjuntos, setFacturaDetalleAdjuntos] = useState([]);
+    const [loadingFacturaDetalleAdjuntos, setLoadingFacturaDetalleAdjuntos] = useState(false);
     
     const [facturasSeleccionadas, setFacturasSeleccionadas] = useState([]);
     const [seleccionarTodas, setSeleccionarTodas] = useState(false);
@@ -75,6 +87,9 @@ const AccountsPayable = () => {
     
     const [error, setError] = useState(null);
     const [success, setSuccess] = useState(null);
+    const [facturaAdjuntos, setFacturaAdjuntos] = useState([]);
+    const facturaFileInputRef = useRef(null);
+    const facturaAdjuntosRef = useRef([]);
 
     // Cargar datos
     useEffect(() => {
@@ -130,6 +145,14 @@ const AccountsPayable = () => {
         });
         
         return () => { unsubProv(); unsubFact(); unsubAbonos(); };
+    }, []);
+
+    useEffect(() => {
+        facturaAdjuntosRef.current = facturaAdjuntos;
+    }, [facturaAdjuntos]);
+
+    useEffect(() => () => {
+        revokeLocalImagePreviewItems(facturaAdjuntosRef.current);
     }, []);
 
     const facturasFiltradas = useMemo(() => {
@@ -213,6 +236,88 @@ const AccountsPayable = () => {
             });
     }, [abonoForm.montoTotal, facturasSeleccionadasOrdenadas]);
 
+    const resetFacturaAdjuntos = () => {
+        revokeLocalImagePreviewItems(facturaAdjuntos);
+        setFacturaAdjuntos([]);
+        if (facturaFileInputRef.current) {
+            facturaFileInputRef.current.value = '';
+        }
+    };
+
+    const handleFacturaAdjuntosSelect = (event) => {
+        const selectedFiles = Array.from(event.target.files || []);
+        if (!selectedFiles.length) return;
+
+        if (facturaAdjuntos.length + selectedFiles.length > MAX_FACTURA_IMAGES) {
+            setError(`Puede adjuntar hasta ${MAX_FACTURA_IMAGES} imágenes por factura.`);
+            if (facturaFileInputRef.current) facturaFileInputRef.current.value = '';
+            return;
+        }
+
+        for (const file of selectedFiles) {
+            if (!file.type.startsWith('image/')) {
+                setError(`"${file.name}" no es una imagen válida.`);
+                if (facturaFileInputRef.current) facturaFileInputRef.current.value = '';
+                return;
+            }
+
+            if (file.size > MAX_IMAGE_SIZE_BYTES) {
+                setError(`"${file.name}" supera el máximo de 5MB.`);
+                if (facturaFileInputRef.current) facturaFileInputRef.current.value = '';
+                return;
+            }
+        }
+
+        setFacturaAdjuntos((prev) => [...prev, ...createLocalImagePreviewItems(selectedFiles, 'factura-proveedor')]);
+        setError(null);
+
+        if (facturaFileInputRef.current) {
+            facturaFileInputRef.current.value = '';
+        }
+    };
+
+    const removeFacturaAdjunto = (attachmentId) => {
+        const adjunto = facturaAdjuntos.find((item) => item.id === attachmentId);
+        if (adjunto?.previewUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(adjunto.previewUrl);
+        }
+        setFacturaAdjuntos((prev) => prev.filter((item) => item.id !== attachmentId));
+        if (facturaFileInputRef.current) {
+            facturaFileInputRef.current.value = '';
+        }
+    };
+
+    const persistFacturaAdjuntos = async (facturaId) =>
+        Promise.all(
+            facturaAdjuntos.map((item) =>
+                createImageAttachment({
+                    file: item.file,
+                    entityType: 'facturaProveedor',
+                    entityId: facturaId,
+                    category: 'facturaProveedor',
+                    fileName: item.name,
+                    userId: user?.uid,
+                    userEmail: user?.email
+                })
+            )
+        );
+
+    const openFacturaDetalle = async (factura) => {
+        setFacturaDetalle(factura);
+        setLoadingFacturaDetalleAdjuntos(true);
+
+        try {
+            const adjuntos = await resolveStoredImageEntries(factura?.adjuntos || []);
+            setFacturaDetalleAdjuntos(adjuntos);
+        } catch (detailError) {
+            console.error('Error cargando adjuntos de factura:', detailError);
+            setError(detailError.message || 'No se pudieron cargar los adjuntos de la factura.');
+            setFacturaDetalleAdjuntos([]);
+        } finally {
+            setLoadingFacturaDetalleAdjuntos(false);
+        }
+    };
+
     // ============================================
     // GUARDAR FACTURA + ASIENTO CONTABLE
     // ============================================
@@ -233,9 +338,12 @@ const AccountsPayable = () => {
             if (!cuentaProveedor) { setError('Cuenta contable de proveedores no encontrada'); return; }
             
             const monto = Number(facturaForm.monto);
+            const facturaRef = doc(collection(db, 'facturasProveedor'));
+            const adjuntosFactura = await persistFacturaAdjuntos(facturaRef.id);
             
             // 1. GUARDAR FACTURA
             const facturaData = {
+                documentoId: facturaRef.id,
                 proveedorId: facturaForm.proveedorId,
                 proveedorNombre: proveedor?.nombre || '',
                 proveedorCodigo: proveedor?.codigo || '',
@@ -255,12 +363,13 @@ const AccountsPayable = () => {
                 cuentaProveedorId: cuentaProveedor.id,
                 cuentaProveedorCode: cuentaProveedor.code,
                 cuentaProveedorName: cuentaProveedor.name,
+                adjuntos: adjuntosFactura,
                 estado: 'pendiente',
                 createdAt: Timestamp.now(),
                 createdBy: user?.uid
             };
             
-            const facturaRef = await addDoc(collection(db, 'facturasProveedor'), facturaData);
+            await setDoc(facturaRef, facturaData);
             
             // 2. CREAR ASIENTO CONTABLE USANDO EL SERVICIO UNIFICADO
             // El servicio espera 'cuentaId', 'cuentaCode', 'cuentaName'
@@ -295,7 +404,8 @@ const AccountsPayable = () => {
                 ],
                 metadata: {
                     sucursalId: facturaForm.sucursalId,
-                    sucursalName: facturaForm.sucursalName
+                    sucursalName: facturaForm.sucursalName,
+                    adjuntosCount: adjuntosFactura.length
                 }
             };
             
@@ -321,6 +431,7 @@ const AccountsPayable = () => {
             setSuccess(`Factura creada y asiento contable registrado: DEBITO ${cuentaGasto.code} / CREDITO ${cuentaProveedor.code}`);
             setShowFacturaModal(false);
             resetFacturaForm();
+            resetFacturaAdjuntos();
             setTimeout(() => setSuccess(null), 5000);
         } catch (err) {
             console.error('Error:', err);
@@ -629,7 +740,7 @@ const AccountsPayable = () => {
 
             {/* Acciones */}
             <div className="flex flex-wrap gap-3 mb-4">
-                <button onClick={() => { resetFacturaForm(); setShowFacturaModal(true); }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"><Plus className="w-5 h-5" />Nueva Factura</button>
+                <button onClick={() => { resetFacturaForm(); resetFacturaAdjuntos(); setShowFacturaModal(true); }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"><Plus className="w-5 h-5" />Nueva Factura</button>
                 {facturasSeleccionadas.length > 0 && (
                     <button onClick={() => { setAbonoForm(prev => ({ ...prev, montoTotal: totalAPagar })); setShowAbonoModal(true); }} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2">
                         <DollarSign className="w-5 h-5" />Pagar ({facturasSeleccionadas.length}) - {formatCurrency(totalAPagar)}
@@ -682,6 +793,11 @@ const AccountsPayable = () => {
                                                     Orden {ordenSeleccion}
                                                 </span>
                                             ) : null}
+                                            {Array.isArray(f.adjuntos) && f.adjuntos.length > 0 ? (
+                                                <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs font-medium">
+                                                    {f.adjuntos.length} imagen{f.adjuntos.length === 1 ? '' : 'es'}
+                                                </span>
+                                            ) : null}
                                         </div>
                                         {f.descripcion && <p className="text-xs text-slate-500 truncate max-w-xs">{f.descripcion}</p>}
                                     </td>
@@ -701,6 +817,7 @@ const AccountsPayable = () => {
                                     <td className="px-3 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${f.estado === 'pagada' ? 'bg-green-100 text-green-700' : f.estado === 'parcial' ? 'bg-amber-100 text-amber-700' : vencida ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>{f.estado === 'pagada' ? 'Pagada' : f.estado === 'parcial' ? 'Parcial' : 'Pendiente'}</span></td>
                                     <td className="px-3 py-3 text-center">
                                         <div className="flex items-center justify-center gap-1">
+                                            <button onClick={() => openFacturaDetalle(f)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Ver factura"><Eye className="w-4 h-4" /></button>
                                             {getAbonosFactura(f.id).length > 0 && <button onClick={() => verAbonosFactura(f)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Ver abonos"><DollarSign className="w-4 h-4" /></button>}
                                             <button onClick={() => handleDeleteFactura(f)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="Eliminar"><Trash2 className="w-4 h-4" /></button>
                                         </div>
@@ -718,7 +835,7 @@ const AccountsPayable = () => {
                     <div className="bg-white rounded-xl shadow-xl max-w-lg w-full">
                         <div className="p-6 border-b border-slate-200 flex items-center justify-between">
                             <h2 className="text-xl font-bold">Nueva Factura</h2>
-                            <button onClick={() => setShowFacturaModal(false)} className="p-2 hover:bg-slate-100 rounded"><X className="w-5 h-5" /></button>
+                            <button onClick={() => { setShowFacturaModal(false); resetFacturaAdjuntos(); }} className="p-2 hover:bg-slate-100 rounded"><X className="w-5 h-5" /></button>
                         </div>
                         <form onSubmit={handleSaveFactura} className="p-6 space-y-4">
                             <div>
@@ -766,11 +883,145 @@ const AccountsPayable = () => {
                                 <p className="text-xs text-slate-500 mt-1">Se debitará esta cuenta. El crédito irá a 210101 - Proveedores.</p>
                             </div>
                             <div><label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label><textarea value={facturaForm.descripcion} onChange={(e) => setFacturaForm({...facturaForm, descripcion: e.target.value})} className="w-full px-3 py-2 border border-slate-300 rounded-lg" rows={2} /></div>
+                            <div className="rounded-xl border border-slate-200 p-4 space-y-4">
+                                <div className="flex items-center justify-between gap-4">
+                                    <div>
+                                        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                                            <Camera className="w-4 h-4 text-blue-600" />
+                                            Imágenes de la factura
+                                        </h3>
+                                        <p className="text-xs text-slate-500 mt-1">Se guardarán junto a la factura para consultarlas después.</p>
+                                    </div>
+                                    <span className="text-sm text-slate-500">{facturaAdjuntos.length}/{MAX_FACTURA_IMAGES}</span>
+                                </div>
+
+                                <input
+                                    ref={facturaFileInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    multiple
+                                    onChange={handleFacturaAdjuntosSelect}
+                                    className="hidden"
+                                />
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (facturaFileInputRef.current) {
+                                            facturaFileInputRef.current.value = '';
+                                            facturaFileInputRef.current.click();
+                                        }
+                                    }}
+                                    className="w-full px-4 py-4 border-2 border-dashed border-slate-300 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition-colors flex flex-col items-center gap-2"
+                                >
+                                    <Upload className="w-6 h-6 text-slate-400" />
+                                    <span className="font-medium text-slate-700">Agregar imágenes</span>
+                                    <span className="text-xs text-slate-500">JPG, PNG o WebP. Máximo 5MB por archivo.</span>
+                                </button>
+
+                                {facturaAdjuntos.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {facturaAdjuntos.map((adjunto, index) => (
+                                            <div key={adjunto.id} className="rounded-xl border border-slate-200 overflow-hidden">
+                                                <img
+                                                    src={adjunto.previewUrl}
+                                                    alt={adjunto.name || `Factura ${index + 1}`}
+                                                    className="w-full h-36 object-cover bg-slate-100"
+                                                    loading="lazy"
+                                                />
+                                                <div className="p-3 flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <p className="text-sm font-medium text-slate-900 truncate">{adjunto.name || `Adjunto ${index + 1}`}</p>
+                                                        <p className="text-xs text-slate-500">{(Number(adjunto.size || 0) / 1024 / 1024).toFixed(2)} MB</p>
+                                                    </div>
+                                                    <button type="button" onClick={() => removeFacturaAdjunto(adjunto.id)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg">
+                                                        <Trash2 className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                             <div className="flex gap-3 pt-4">
-                                <button type="button" onClick={() => setShowFacturaModal(false)} className="flex-1 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancelar</button>
+                                <button type="button" onClick={() => { setShowFacturaModal(false); resetFacturaAdjuntos(); }} className="flex-1 px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancelar</button>
                                 <button type="submit" className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"><Save className="w-5 h-5 inline mr-2" />Guardar Factura</button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {facturaDetalle && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-auto">
+                        <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-slate-900">Factura {facturaDetalle.numeroFactura}</h2>
+                                <p className="text-sm text-slate-500">{facturaDetalle.proveedorNombre || facturaDetalle.cuentaProveedorName || 'Entidad'}</p>
+                            </div>
+                            <button type="button" onClick={() => { setFacturaDetalle(null); setFacturaDetalleAdjuntos([]); }} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cerrar</button>
+                        </div>
+
+                        <div className="p-6 space-y-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                <div className="rounded-xl border border-slate-200 p-4 space-y-2">
+                                    <p><span className="font-medium">Sucursal:</span> {facturaDetalle.sucursalName || 'General'}</p>
+                                    <p><span className="font-medium">Fecha emisión:</span> {facturaDetalle.fechaEmision || '-'}</p>
+                                    <p><span className="font-medium">Vencimiento:</span> {facturaDetalle.fechaVencimiento || '-'}</p>
+                                    <p><span className="font-medium">Monto:</span> {formatCurrency(facturaDetalle.monto)}</p>
+                                    <p><span className="font-medium">Saldo pendiente:</span> {formatCurrency(facturaDetalle.saldoPendiente)}</p>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 p-4 space-y-2">
+                                    <p><span className="font-medium">Cuenta gasto/costo:</span> {facturaDetalle.cuentaGastoCode} - {facturaDetalle.cuentaGastoName}</p>
+                                    <p><span className="font-medium">Cuenta por pagar:</span> {facturaDetalle.cuentaProveedorCode} - {facturaDetalle.cuentaProveedorName}</p>
+                                    <p><span className="font-medium">Estado:</span> {facturaDetalle.estado || 'pendiente'}</p>
+                                    {facturaDetalle.descripcion && <p><span className="font-medium">Descripción:</span> {facturaDetalle.descripcion}</p>}
+                                </div>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-200 p-4">
+                                <div className="flex items-center justify-between gap-3 mb-4">
+                                    <div>
+                                        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                                            <Image className="w-4 h-4 text-blue-600" />
+                                            Imágenes adjuntas
+                                        </h3>
+                                        <p className="text-sm text-slate-500">Comprobantes guardados en la factura.</p>
+                                    </div>
+                                    {loadingFacturaDetalleAdjuntos && <RefreshCw className="w-4 h-4 animate-spin text-slate-500" />}
+                                </div>
+
+                                {!loadingFacturaDetalleAdjuntos && facturaDetalleAdjuntos.length === 0 && (
+                                    <p className="text-sm text-slate-500">Esta factura no tiene imágenes adjuntas.</p>
+                                )}
+
+                                {facturaDetalleAdjuntos.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {facturaDetalleAdjuntos.map((item, index) => (
+                                            <a
+                                                key={item.attachmentId || item.url || index}
+                                                href={item.url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="rounded-xl border border-slate-200 overflow-hidden hover:shadow-md transition-shadow"
+                                            >
+                                                <img
+                                                    src={item.url}
+                                                    alt={item.name || `Factura ${index + 1}`}
+                                                    className="w-full h-56 object-cover bg-slate-100"
+                                                    loading="lazy"
+                                                />
+                                                <div className="p-3">
+                                                    <p className="text-sm font-medium text-slate-900 truncate">{item.name || `Adjunto ${index + 1}`}</p>
+                                                    <p className="text-xs text-blue-600 mt-1">Abrir imagen completa</p>
+                                                </div>
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
                     </div>
                 </div>
             )}

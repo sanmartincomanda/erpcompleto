@@ -41,6 +41,23 @@ const fitWithin = (width, height, maxDimension) => {
 
 const getStringByteSize = (value) => new TextEncoder().encode(String(value || '')).length;
 
+export const createLocalImagePreviewItems = (files = [], prefix = 'img') =>
+    Array.from(files).map((file, index) => ({
+        id: `${prefix}-${Date.now()}-${index}-${file.name}`,
+        file,
+        name: file.name,
+        size: file.size || 0,
+        previewUrl: URL.createObjectURL(file)
+    }));
+
+export const revokeLocalImagePreviewItems = (items = []) => {
+    items.forEach((item) => {
+        if (item?.previewUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(item.previewUrl);
+        }
+    });
+};
+
 const renderImageCandidate = (image, width, height, quality) => {
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -187,4 +204,40 @@ export const fetchImageAttachment = async (attachmentId) => {
         id: snapshot.id,
         ...snapshot.data()
     };
+};
+
+export const resolveStoredImageEntries = async (items = []) => {
+    const normalizedItems = Array.isArray(items) ? items : [];
+
+    const resolved = await Promise.all(
+        normalizedItems.map(async (item, index) => {
+            const directUrl =
+                typeof item === 'string'
+                    ? item
+                    : item?.url || item?.downloadURL || item?.comprobanteURL || item?.dataUrl || null;
+
+            if (directUrl) {
+                return {
+                    ...(typeof item === 'object' && item ? item : {}),
+                    url: directUrl,
+                    name:
+                        (typeof item === 'object' && item?.name) ||
+                        `Imagen ${index + 1}`
+                };
+            }
+
+            if (!item?.attachmentId) return null;
+
+            const attachment = await fetchImageAttachment(item.attachmentId);
+            if (!attachment?.dataUrl) return null;
+
+            return {
+                ...item,
+                url: attachment.dataUrl,
+                name: item?.name || attachment.originalName || `Imagen ${index + 1}`
+            };
+        })
+    );
+
+    return resolved.filter(Boolean);
 };

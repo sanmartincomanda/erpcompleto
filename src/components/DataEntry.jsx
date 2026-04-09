@@ -1,13 +1,19 @@
 // src/components/DataEntry.jsx
 // CORREGIDO: Vinculación correcta al plan de cuentas actual + Selección de sucursal
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { usePlanCuentas } from '../hooks/useUnifiedAccounting';
 import { useBranches } from '../hooks/useBranches';
 import { registerAccountingEntry, DOCUMENT_TYPES } from '../services/unifiedAccountingService';
-import { collection, doc, onSnapshot, query, setDoc, Timestamp, where, orderBy } from 'firebase/firestore';
+import { collection, doc, getDoc, onSnapshot, query, setDoc, Timestamp, where, orderBy } from 'firebase/firestore';
 import { db } from '../firebase';
+import {
+    createImageAttachment,
+    createLocalImagePreviewItems,
+    revokeLocalImagePreviewItems,
+    resolveStoredImageEntries
+} from '../utils/imageAttachments';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import {
@@ -30,11 +36,18 @@ import {
     ArrowLeft,
     Edit3,
     Eye,
+    Image,
     CreditCard,
     User,
     Wallet,
-    Landmark
+    Landmark,
+    Camera,
+    Upload,
+    X
 } from 'lucide-react';
+
+const MAX_DATA_ENTRY_IMAGES = 4;
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 
 const FormField = React.memo(({ label, icon: Icon, children, required }) => (
     <div className="space-y-1.5">
@@ -100,6 +113,15 @@ const DataEntry = () => {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState(null);
     const [success, setSuccess] = useState(null);
+    const [ventaAdjuntos, setVentaAdjuntos] = useState([]);
+    const [gastoAdjuntos, setGastoAdjuntos] = useState([]);
+    const [detalleDocumento, setDetalleDocumento] = useState(null);
+    const [detalleAdjuntos, setDetalleAdjuntos] = useState([]);
+    const [loadingDetalleAdjuntos, setLoadingDetalleAdjuntos] = useState(false);
+    const ventaFileInputRef = useRef(null);
+    const gastoFileInputRef = useRef(null);
+    const ventaAdjuntosRef = useRef([]);
+    const gastoAdjuntosRef = useRef([]);
 
     const { 
         accounts,
@@ -170,6 +192,144 @@ const DataEntry = () => {
         return () => unsubscribe && unsubscribe();
     }, []);
 
+    useEffect(() => {
+        ventaAdjuntosRef.current = ventaAdjuntos;
+    }, [ventaAdjuntos]);
+
+    useEffect(() => {
+        gastoAdjuntosRef.current = gastoAdjuntos;
+    }, [gastoAdjuntos]);
+
+    useEffect(() => () => {
+        revokeLocalImagePreviewItems(ventaAdjuntosRef.current);
+        revokeLocalImagePreviewItems(gastoAdjuntosRef.current);
+    }, []);
+
+    const resetVentaAdjuntos = () => {
+        revokeLocalImagePreviewItems(ventaAdjuntos);
+        setVentaAdjuntos([]);
+        if (ventaFileInputRef.current) {
+            ventaFileInputRef.current.value = '';
+        }
+    };
+
+    const resetGastoAdjuntos = () => {
+        revokeLocalImagePreviewItems(gastoAdjuntos);
+        setGastoAdjuntos([]);
+        if (gastoFileInputRef.current) {
+            gastoFileInputRef.current.value = '';
+        }
+    };
+
+    const handleAdjuntosSelect = (event, currentItems, setItems, inputRef, prefix) => {
+        const selectedFiles = Array.from(event.target.files || []);
+        if (!selectedFiles.length) return;
+
+        const totalFiles = currentItems.length + selectedFiles.length;
+        if (totalFiles > MAX_DATA_ENTRY_IMAGES) {
+            setError(`Puede adjuntar hasta ${MAX_DATA_ENTRY_IMAGES} imágenes por registro.`);
+            if (inputRef?.current) inputRef.current.value = '';
+            return;
+        }
+
+        for (const file of selectedFiles) {
+            if (!file.type.startsWith('image/')) {
+                setError(`"${file.name}" no es una imagen válida.`);
+                if (inputRef?.current) inputRef.current.value = '';
+                return;
+            }
+
+            if (file.size > MAX_IMAGE_SIZE_BYTES) {
+                setError(`"${file.name}" supera el máximo de 5MB.`);
+                if (inputRef?.current) inputRef.current.value = '';
+                return;
+            }
+        }
+
+        const nuevosAdjuntos = createLocalImagePreviewItems(selectedFiles, prefix);
+        setItems((prev) => [...prev, ...nuevosAdjuntos]);
+        setError(null);
+
+        if (inputRef?.current) {
+            inputRef.current.value = '';
+        }
+    };
+
+    const removeAdjunto = (attachmentId, items, setItems, inputRef) => {
+        const adjunto = items.find((item) => item.id === attachmentId);
+        if (adjunto?.previewUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(adjunto.previewUrl);
+        }
+        setItems((prev) => prev.filter((item) => item.id !== attachmentId));
+        if (inputRef?.current) {
+            inputRef.current.value = '';
+        }
+    };
+
+    const persistAdjuntos = async (items, entityType, entityId, category) =>
+        Promise.all(
+            items.map((item) =>
+                createImageAttachment({
+                    file: item.file,
+                    entityType,
+                    entityId,
+                    category,
+                    fileName: item.name,
+                    userId: user?.uid,
+                    userEmail: user?.email
+                })
+            )
+        );
+
+    const openDetalleDocumento = async (movimiento) => {
+        if (!movimiento?.documentoId) return;
+
+        const configByType = {
+            [DOCUMENT_TYPES.INGRESO]: {
+                collectionName: 'ventasDirectas',
+                title: 'Detalle de ingreso'
+            },
+            [DOCUMENT_TYPES.GASTO]: {
+                collectionName: 'gastosDirectos',
+                title: 'Detalle de gasto'
+            },
+            [DOCUMENT_TYPES.FACTURA_PROVEEDOR]: {
+                collectionName: 'facturasProveedor',
+                title: 'Detalle de gasto a crédito'
+            }
+        };
+
+        const config = configByType[movimiento.documentoTipo];
+        if (!config) {
+            setError('No hay detalle disponible para este movimiento.');
+            return;
+        }
+
+        setLoadingDetalleAdjuntos(true);
+
+        try {
+            const documentSnap = await getDoc(doc(db, config.collectionName, movimiento.documentoId));
+            if (!documentSnap.exists()) {
+                throw new Error('No se encontró el documento origen de este movimiento.');
+            }
+
+            const documentData = { id: documentSnap.id, ...documentSnap.data() };
+            const adjuntos = await resolveStoredImageEntries(documentData.adjuntos || []);
+
+            setDetalleDocumento({
+                ...documentData,
+                title: config.title,
+                tipoDocumento: movimiento.documentoTipo
+            });
+            setDetalleAdjuntos(adjuntos);
+        } catch (detailError) {
+            console.error('Error cargando detalle de Data Entry:', detailError);
+            setError(detailError.message || 'No se pudo cargar el detalle del documento.');
+        } finally {
+            setLoadingDetalleAdjuntos(false);
+        }
+    };
+
     const handleRegistrarVenta = async (e) => {
         e.preventDefault();
         
@@ -220,6 +380,12 @@ const DataEntry = () => {
 
             const ventaRef = doc(collection(db, 'ventasDirectas'));
             const referenciaVenta = ventaForm.factura || `VTA-${ventaRef.id.slice(0, 8).toUpperCase()}`;
+            const ventaAdjuntosGuardados = await persistAdjuntos(
+                ventaAdjuntos,
+                'dataEntryIngreso',
+                ventaRef.id,
+                'comprobanteIngreso'
+            );
 
             const entry = await registerAccountingEntry({
                 fecha: ventaForm.fecha,
@@ -236,6 +402,7 @@ const DataEntry = () => {
                     factura: ventaForm.factura,
                     metodoPago: ventaForm.metodoPago,
                     moneda: ventaForm.moneda,
+                    adjuntosCount: ventaAdjuntosGuardados.length,
                     sucursalId: ventaForm.sucursalId,
                     sucursalName: ventaForm.sucursalName
                 }
@@ -259,6 +426,7 @@ const DataEntry = () => {
                 cuentaDestinoName: cuentaDestino.name,
                 sucursalId: ventaForm.sucursalId,
                 sucursalName: ventaForm.sucursalName,
+                adjuntos: ventaAdjuntosGuardados,
                 asientoId: entry.asientoId,
                 movimientosContablesIds: entry.movimientos.map(m => m.id),
                 createdAt: Timestamp.now(),
@@ -284,6 +452,7 @@ const DataEntry = () => {
                 cuentaIngresoCode: '',
                 cuentaIngresoName: ''
             });
+            resetVentaAdjuntos();
 
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
@@ -335,6 +504,12 @@ const DataEntry = () => {
             const documentoContableTipo = gastoForm.esCompraCredito
                 ? DOCUMENT_TYPES.FACTURA_PROVEEDOR
                 : DOCUMENT_TYPES.GASTO;
+            const gastoAdjuntosGuardados = await persistAdjuntos(
+                gastoAdjuntos,
+                gastoForm.esCompraCredito ? 'dataEntryFacturaProveedor' : 'dataEntryGasto',
+                documentoContableId,
+                gastoForm.esCompraCredito ? 'facturaProveedor' : 'comprobanteGasto'
+            );
 
             if (gastoForm.esCompraCredito) {
                 movimientos.push(
@@ -398,6 +573,7 @@ const DataEntry = () => {
                     metodoPago: gastoForm.metodoPago,
                     moneda: gastoForm.moneda,
                     esCompraCredito: gastoForm.esCompraCredito,
+                    adjuntosCount: gastoAdjuntosGuardados.length,
                     gastoDirectoId: gastoRef.id,
                     facturaProveedorId: facturaProveedorRef?.id || null,
                     sucursalId: gastoForm.sucursalId,
@@ -427,6 +603,7 @@ const DataEntry = () => {
                 cuentaOrigenName: cuentaOrigen?.name,
                 sucursalId: gastoForm.sucursalId,
                 sucursalName: gastoForm.sucursalName,
+                adjuntos: gastoAdjuntosGuardados,
                 asientoId: entry.asientoId,
                 movimientosContablesIds: entry.movimientos.map(m => m.id),
                 facturaProveedorId: facturaProveedorRef?.id || null,
@@ -459,6 +636,7 @@ const DataEntry = () => {
                     cuentaProveedorCode: gastoForm.cuentaPasivoCode,
                     cuentaProveedorName: gastoForm.cuentaPasivoName,
                     estado: 'pendiente',
+                    adjuntos: gastoAdjuntosGuardados,
                     asientoId: entry.asientoId,
                     movimientosContablesIds: entry.movimientos.map((m) => m.id),
                     createdAt: Timestamp.now(),
@@ -493,6 +671,7 @@ const DataEntry = () => {
                 cuentaPasivoName: cuentaPasivoPredeterminada?.name || '',
                 esCompraCredito: false
             });
+            resetGastoAdjuntos();
 
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
@@ -510,6 +689,76 @@ const DataEntry = () => {
             maximumFractionDigits: 2
         })}`;
     };
+
+    const renderAdjuntosSection = ({ title, items, onPick, onRemove, inputRef }) => (
+        <div className="bg-gray-50 rounded-xl p-5">
+            <div className="flex items-center justify-between gap-4 mb-4">
+                <div>
+                    <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide flex items-center gap-2">
+                        <Camera className="w-4 h-4" />
+                        {title}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                        Adjunte hasta {MAX_DATA_ENTRY_IMAGES} imágenes. Se guardarán con el documento para consultarlas después.
+                    </p>
+                </div>
+                <span className="text-sm text-gray-500">{items.length}/{MAX_DATA_ENTRY_IMAGES}</span>
+            </div>
+
+            <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={onPick}
+            />
+
+            <button
+                type="button"
+                onClick={() => {
+                    if (inputRef.current) {
+                        inputRef.current.value = '';
+                        inputRef.current.click();
+                    }
+                }}
+                className="w-full px-4 py-4 rounded-xl border-2 border-dashed border-gray-300 hover:border-blue-500 hover:bg-white transition-colors flex flex-col items-center justify-center gap-2"
+            >
+                <Upload className="w-6 h-6 text-gray-400" />
+                <span className="font-medium text-gray-700">Agregar imágenes</span>
+                <span className="text-xs text-gray-500">JPG, PNG o WebP. Máximo 5MB por archivo.</span>
+            </button>
+
+            {items.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                    {items.map((item, index) => (
+                        <div key={item.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+                            <img
+                                src={item.previewUrl}
+                                alt={item.name || `Adjunto ${index + 1}`}
+                                className="w-full h-44 object-cover bg-gray-100"
+                                loading="lazy"
+                            />
+                            <div className="p-3 flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-medium text-gray-900 truncate">{item.name || `Adjunto ${index + 1}`}</p>
+                                    <p className="text-xs text-gray-500">{(Number(item.size || 0) / 1024 / 1024).toFixed(2)} MB</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => onRemove(item.id)}
+                                    className="p-2 text-red-600 hover:bg-red-50 rounded-lg"
+                                    title="Quitar imagen"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
 
     const renderVentaForm = () => (
         <form onSubmit={handleRegistrarVenta} className="space-y-6">
@@ -700,6 +949,16 @@ const DataEntry = () => {
                     </FormField>
                 </div>
             </div>
+
+            {renderAdjuntosSection({
+                title: 'Imágenes del ingreso',
+                items: ventaAdjuntos,
+                onPick: (event) =>
+                    handleAdjuntosSelect(event, ventaAdjuntos, setVentaAdjuntos, ventaFileInputRef, 'venta'),
+                onRemove: (attachmentId) =>
+                    removeAdjunto(attachmentId, ventaAdjuntos, setVentaAdjuntos, ventaFileInputRef),
+                inputRef: ventaFileInputRef
+            })}
 
             {/* Mensajes */}
             {error && (
@@ -972,6 +1231,16 @@ const DataEntry = () => {
                 </div>
             </div>
 
+            {renderAdjuntosSection({
+                title: gastoForm.esCompraCredito ? 'Imágenes de la factura / gasto a crédito' : 'Imágenes del gasto',
+                items: gastoAdjuntos,
+                onPick: (event) =>
+                    handleAdjuntosSelect(event, gastoAdjuntos, setGastoAdjuntos, gastoFileInputRef, 'gasto'),
+                onRemove: (attachmentId) =>
+                    removeAdjunto(attachmentId, gastoAdjuntos, setGastoAdjuntos, gastoFileInputRef),
+                inputRef: gastoFileInputRef
+            })}
+
             {/* Mensajes */}
             {error && (
                 <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-red-700">
@@ -1018,6 +1287,7 @@ const DataEntry = () => {
                                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Cuenta</th>
                                 <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Monto</th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Tipo</th>
+                                <th className="px-4 py-3 text-center text-sm font-medium text-gray-700">Acciones</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
@@ -1040,6 +1310,16 @@ const DataEntry = () => {
                                         }`}>
                                             {mov.type === 'DEBITO' ? 'Débito' : 'Crédito'}
                                         </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                        <button
+                                            type="button"
+                                            onClick={() => openDetalleDocumento(mov)}
+                                            className="inline-flex items-center justify-center p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
+                                            title="Ver detalle"
+                                        >
+                                            <Eye className="w-4 h-4" />
+                                        </button>
                                     </td>
                                 </tr>
                             ))}
@@ -1108,6 +1388,88 @@ const DataEntry = () => {
                 {activeTab === 'gastos' && renderGastoForm()}
                 {activeTab === 'historial' && renderHistorial()}
             </div>
+
+            {detalleDocumento && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-auto">
+                        <div className="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
+                            <div>
+                                <h2 className="text-xl font-bold text-gray-900">{detalleDocumento.title}</h2>
+                                <p className="text-sm text-gray-500">{detalleDocumento.descripcion || detalleDocumento.numeroFactura || detalleDocumento.factura || detalleDocumento.id}</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setDetalleDocumento(null);
+                                    setDetalleAdjuntos([]);
+                                }}
+                                className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                            >
+                                Cerrar
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                <div className="rounded-xl border border-gray-200 p-4 space-y-2">
+                                    <p><span className="font-medium">Fecha:</span> {detalleDocumento.fecha || detalleDocumento.fechaEmision || '-'}</p>
+                                    <p><span className="font-medium">Sucursal:</span> {detalleDocumento.sucursalName || 'Sin sucursal'}</p>
+                                    <p><span className="font-medium">Monto:</span> {formatCurrency(detalleDocumento.monto, detalleDocumento.moneda || 'NIO')}</p>
+                                    <p><span className="font-medium">Moneda:</span> {detalleDocumento.moneda || 'NIO'}</p>
+                                </div>
+                                <div className="rounded-xl border border-gray-200 p-4 space-y-2">
+                                    <p><span className="font-medium">Referencia:</span> {detalleDocumento.factura || detalleDocumento.numeroFactura || detalleDocumento.documentoId || '-'}</p>
+                                    <p><span className="font-medium">Cliente / Proveedor:</span> {detalleDocumento.cliente || detalleDocumento.proveedorNombre || detalleDocumento.proveedor || '-'}</p>
+                                    <p><span className="font-medium">Cuenta principal:</span> {detalleDocumento.cuentaIngresoCode || detalleDocumento.cuentaGastoCode || '-'} {detalleDocumento.cuentaIngresoName || detalleDocumento.cuentaGastoName || ''}</p>
+                                    {detalleDocumento.metodoPago && <p><span className="font-medium">Método:</span> {detalleDocumento.metodoPago}</p>}
+                                </div>
+                            </div>
+
+                            <div className="rounded-xl border border-gray-200 p-4">
+                                <div className="flex items-center justify-between gap-3 mb-4">
+                                    <div>
+                                        <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                                            <Image className="w-4 h-4 text-blue-600" />
+                                            Imágenes adjuntas
+                                        </h3>
+                                        <p className="text-sm text-gray-500">Comprobantes guardados junto al documento.</p>
+                                    </div>
+                                    {loadingDetalleAdjuntos && <RefreshCw className="w-4 h-4 animate-spin text-gray-500" />}
+                                </div>
+
+                                {!loadingDetalleAdjuntos && detalleAdjuntos.length === 0 && (
+                                    <p className="text-sm text-gray-500">Este documento no tiene imágenes adjuntas.</p>
+                                )}
+
+                                {detalleAdjuntos.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {detalleAdjuntos.map((item, index) => (
+                                            <a
+                                                key={item.attachmentId || item.url || index}
+                                                href={item.url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition-shadow"
+                                            >
+                                                <img
+                                                    src={item.url}
+                                                    alt={item.name || `Adjunto ${index + 1}`}
+                                                    className="w-full h-56 object-cover bg-gray-100"
+                                                    loading="lazy"
+                                                />
+                                                <div className="p-3">
+                                                    <p className="text-sm font-medium text-gray-900 truncate">{item.name || `Adjunto ${index + 1}`}</p>
+                                                    <p className="text-xs text-blue-600 mt-1">Abrir imagen completa</p>
+                                                </div>
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

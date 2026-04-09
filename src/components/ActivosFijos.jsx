@@ -1,19 +1,29 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { collection, onSnapshot } from 'firebase/firestore';
 import {
     AlertCircle,
     Calculator,
+    Camera,
     CheckCircle,
     Eye,
+    Image,
     Package,
     Plus,
     RefreshCw,
-    Search
+    Search,
+    Trash2,
+    Upload
 } from 'lucide-react';
 import { db } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { useBranches } from '../hooks/useBranches';
 import { usePlanCuentas } from '../hooks/useUnifiedAccounting';
+import {
+    createImageAttachment,
+    createLocalImagePreviewItems,
+    revokeLocalImagePreviewItems,
+    resolveStoredImageEntries
+} from '../utils/imageAttachments';
 import {
     createActivoFijo,
     generarDepreciacionActivoFijo,
@@ -44,6 +54,8 @@ const formatCurrency = (value, currency = 'NIO') =>
     }).format(Number(value || 0));
 const branchName = (branch) =>
     branch?.name || branch?.nombre || branch?.branchName || branch?.tienda || 'Sucursal';
+const MAX_ACTIVO_IMAGES = 5;
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const isProviderLiability = (account) => {
     const code = String(account?.code || '').replace(/\./g, '');
     return account?.subType === 'proveedores' || code === '210101' || normalizeText(account?.name).includes('proveedor');
@@ -108,12 +120,17 @@ const ActivosFijos = () => {
     const [processingAssetId, setProcessingAssetId] = useState('');
     const [processingBulk, setProcessingBulk] = useState(false);
     const [selectedAsset, setSelectedAsset] = useState(null);
+    const [selectedAssetAdjuntos, setSelectedAssetAdjuntos] = useState([]);
+    const [loadingSelectedAssetAdjuntos, setLoadingSelectedAssetAdjuntos] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [sucursalFiltro, setSucursalFiltro] = useState('');
     const [estadoFiltro, setEstadoFiltro] = useState('');
     const [periodoDepreciacion, setPeriodoDepreciacion] = useState(currentPeriod());
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
+    const [activoAdjuntos, setActivoAdjuntos] = useState([]);
+    const activoFileInputRef = useRef(null);
+    const activoAdjuntosRef = useRef([]);
 
     useEffect(() => {
         const unsubActivos = onSnapshot(collection(db, 'activosFijos'), (snapshot) => {
@@ -146,6 +163,49 @@ const ActivosFijos = () => {
         const updatedAsset = activos.find((asset) => asset.id === selectedAsset.id);
         if (updatedAsset) setSelectedAsset(updatedAsset);
     }, [activos, selectedAsset]);
+
+    useEffect(() => {
+        activoAdjuntosRef.current = activoAdjuntos;
+    }, [activoAdjuntos]);
+
+    useEffect(() => () => {
+        revokeLocalImagePreviewItems(activoAdjuntosRef.current);
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadAdjuntosActivo = async () => {
+            if (!selectedAsset) {
+                setSelectedAssetAdjuntos([]);
+                setLoadingSelectedAssetAdjuntos(false);
+                return;
+            }
+
+            setLoadingSelectedAssetAdjuntos(true);
+            try {
+                const adjuntos = await resolveStoredImageEntries(selectedAsset.adjuntos || []);
+                if (!cancelled) {
+                    setSelectedAssetAdjuntos(adjuntos);
+                }
+            } catch (attachmentError) {
+                console.error('Error cargando adjuntos del activo:', attachmentError);
+                if (!cancelled) {
+                    setSelectedAssetAdjuntos([]);
+                }
+            } finally {
+                if (!cancelled) {
+                    setLoadingSelectedAssetAdjuntos(false);
+                }
+            }
+        };
+
+        loadAdjuntosActivo();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [selectedAsset]);
 
     const cuentasActivoFijo = useMemo(() => accounts
         .filter((account) => {
@@ -279,6 +339,72 @@ const ActivosFijos = () => {
         cuentaPasivoId: form.tipoAdquisicion === 'credito' && cuentaProveedorDefault ? cuentaProveedorDefault.id : ''
     }));
 
+    const resetActivoAdjuntos = () => {
+        revokeLocalImagePreviewItems(activoAdjuntos);
+        setActivoAdjuntos([]);
+        if (activoFileInputRef.current) {
+            activoFileInputRef.current.value = '';
+        }
+    };
+
+    const handleActivoAdjuntosSelect = (event) => {
+        const selectedFiles = Array.from(event.target.files || []);
+        if (!selectedFiles.length) return;
+
+        if (activoAdjuntos.length + selectedFiles.length > MAX_ACTIVO_IMAGES) {
+            setError(`Puede adjuntar hasta ${MAX_ACTIVO_IMAGES} imágenes por activo.`);
+            if (activoFileInputRef.current) activoFileInputRef.current.value = '';
+            return;
+        }
+
+        for (const file of selectedFiles) {
+            if (!file.type.startsWith('image/')) {
+                setError(`"${file.name}" no es una imagen válida.`);
+                if (activoFileInputRef.current) activoFileInputRef.current.value = '';
+                return;
+            }
+
+            if (file.size > MAX_IMAGE_SIZE_BYTES) {
+                setError(`"${file.name}" supera el máximo de 5MB.`);
+                if (activoFileInputRef.current) activoFileInputRef.current.value = '';
+                return;
+            }
+        }
+
+        setActivoAdjuntos((prev) => [...prev, ...createLocalImagePreviewItems(selectedFiles, 'activo-fijo')]);
+        setError('');
+
+        if (activoFileInputRef.current) {
+            activoFileInputRef.current.value = '';
+        }
+    };
+
+    const removeActivoAdjunto = (attachmentId) => {
+        const attachment = activoAdjuntos.find((item) => item.id === attachmentId);
+        if (attachment?.previewUrl?.startsWith('blob:')) {
+            URL.revokeObjectURL(attachment.previewUrl);
+        }
+        setActivoAdjuntos((prev) => prev.filter((item) => item.id !== attachmentId));
+        if (activoFileInputRef.current) {
+            activoFileInputRef.current.value = '';
+        }
+    };
+
+    const persistActivoAdjuntos = async () =>
+        Promise.all(
+            activoAdjuntos.map((item) =>
+                createImageAttachment({
+                    file: item.file,
+                    entityType: 'activoFijo',
+                    entityId: null,
+                    category: 'activoFijo',
+                    fileName: item.name,
+                    userId: user?.uid,
+                    userEmail: user?.email
+                })
+            )
+        );
+
     const handleSubmit = async (event) => {
         event.preventDefault();
         resetMessages();
@@ -293,6 +419,7 @@ const ActivosFijos = () => {
 
         setSubmitting(true);
         try {
+            const adjuntos = await persistActivoAdjuntos();
             const result = await createActivoFijo({
                 ...form,
                 nombre: form.nombre.trim(),
@@ -302,11 +429,13 @@ const ActivosFijos = () => {
                 valorResidual: toNumber(form.valorResidual),
                 vidaUtilMeses: toNumber(form.vidaUtilMeses),
                 tipoCambio: Number(form.tipoCambio) || 1,
+                adjuntos,
                 userId: user?.uid,
                 userEmail: user?.email
             });
             setSuccess(result.facturaProveedorId ? 'Activo fijo registrado y vinculado a cuentas por pagar.' : 'Activo fijo registrado correctamente.');
             resetFormState();
+            resetActivoAdjuntos();
             setActiveTab('activos');
         } catch (submitError) {
             setError(submitError.message || 'No se pudo registrar el activo fijo.');
@@ -548,8 +677,68 @@ const ActivosFijos = () => {
                                 <p>3. Si el crédito va a Proveedores, el ERP lo enviará también a CxP.</p>
                                 <p>4. Luego podrá generar la depreciación por período sin duplicados.</p>
                             </div>
+                            <div className="rounded-2xl border border-slate-200 p-5 space-y-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                                            <Camera className="w-4 h-4 text-amber-600" />
+                                            Imágenes del activo
+                                        </h3>
+                                        <p className="text-xs text-slate-500 mt-1">Factura, escritura o cualquier soporte del activo.</p>
+                                    </div>
+                                    <span className="text-sm text-slate-500">{activoAdjuntos.length}/{MAX_ACTIVO_IMAGES}</span>
+                                </div>
+
+                                <input
+                                    ref={activoFileInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    multiple
+                                    onChange={handleActivoAdjuntosSelect}
+                                    className="hidden"
+                                />
+
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        if (activoFileInputRef.current) {
+                                            activoFileInputRef.current.value = '';
+                                            activoFileInputRef.current.click();
+                                        }
+                                    }}
+                                    className="w-full px-4 py-4 border-2 border-dashed border-slate-300 rounded-xl hover:border-amber-500 hover:bg-amber-50 transition-colors flex flex-col items-center gap-2"
+                                >
+                                    <Upload className="w-6 h-6 text-slate-400" />
+                                    <span className="font-medium text-slate-700">Agregar imágenes</span>
+                                    <span className="text-xs text-slate-500">JPG, PNG o WebP. Máximo 5MB por archivo.</span>
+                                </button>
+
+                                {activoAdjuntos.length > 0 && (
+                                    <div className="space-y-3">
+                                        {activoAdjuntos.map((item, index) => (
+                                            <div key={item.id} className="rounded-xl border border-slate-200 overflow-hidden bg-white">
+                                                <img
+                                                    src={item.previewUrl}
+                                                    alt={item.name || `Activo ${index + 1}`}
+                                                    className="w-full h-36 object-cover bg-slate-100"
+                                                    loading="lazy"
+                                                />
+                                                <div className="p-3 flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <p className="text-sm font-medium text-slate-900 truncate">{item.name || `Adjunto ${index + 1}`}</p>
+                                                        <p className="text-xs text-slate-500">{(Number(item.size || 0) / 1024 / 1024).toFixed(2)} MB</p>
+                                                    </div>
+                                                    <button type="button" onClick={() => removeActivoAdjunto(item.id)} className="p-2 text-red-600 hover:bg-red-50 rounded-lg">
+                                                        <Trash2 className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                             <button type="submit" disabled={submitting} className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold disabled:opacity-60">{submitting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}{submitting ? 'Registrando...' : 'Registrar Activo Fijo'}</button>
-                            <button type="button" onClick={() => { resetMessages(); resetFormState(); }} className="w-full px-4 py-3 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 font-semibold">Limpiar formulario</button>
+                            <button type="button" onClick={() => { resetMessages(); resetFormState(); resetActivoAdjuntos(); }} className="w-full px-4 py-3 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 font-semibold">Limpiar formulario</button>
                         </div>
                     </form>
                 )}
@@ -607,6 +796,7 @@ const ActivosFijos = () => {
                                                 <div className="text-sm text-slate-500">{asset.numeroDocumento || 'Sin documento'}</div>
                                                 <div className="text-xs text-slate-500 mt-1">{asset.cuentaActivoCode} - {asset.cuentaActivoName}</div>
                                                 {asset.facturaProveedorId && <span className="inline-flex mt-2 px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-700">Vinculado a CxP</span>}
+                                                {Array.isArray(asset.adjuntos) && asset.adjuntos.length > 0 && <span className="inline-flex mt-2 ml-2 px-2 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-700">{asset.adjuntos.length} imagen{asset.adjuntos.length === 1 ? '' : 'es'}</span>}
                                             </td>
                                             <td className="px-4 py-4 text-sm text-slate-700">{asset.sucursalName || 'Sin sucursal'}</td>
                                             <td className="px-4 py-4 text-sm text-slate-700">{formatCurrency(asset.costoOriginal)}</td>
@@ -732,6 +922,48 @@ const ActivosFijos = () => {
                                     <p><span className="font-medium">Asiento adquisición:</span> {selectedAsset.asientoAdquisicionId || 'No disponible'}</p>
                                     {selectedAsset.facturaProveedorId && <p><span className="font-medium">Factura CxP:</span> {selectedAsset.facturaProveedorId}</p>}
                                 </div>
+                            </div>
+
+                            <div className="rounded-2xl border border-slate-200 p-5">
+                                <div className="flex items-center justify-between gap-3 mb-4">
+                                    <div>
+                                        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                                            <Image className="w-4 h-4 text-amber-600" />
+                                            Imágenes adjuntas
+                                        </h3>
+                                        <p className="text-sm text-slate-500">Soportes guardados con este activo fijo.</p>
+                                    </div>
+                                    {loadingSelectedAssetAdjuntos && <RefreshCw className="w-4 h-4 animate-spin text-slate-500" />}
+                                </div>
+
+                                {!loadingSelectedAssetAdjuntos && selectedAssetAdjuntos.length === 0 && (
+                                    <p className="text-sm text-slate-500">Este activo no tiene imágenes adjuntas.</p>
+                                )}
+
+                                {selectedAssetAdjuntos.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {selectedAssetAdjuntos.map((item, index) => (
+                                            <a
+                                                key={item.attachmentId || item.url || index}
+                                                href={item.url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="rounded-xl border border-slate-200 overflow-hidden hover:shadow-md transition-shadow"
+                                            >
+                                                <img
+                                                    src={item.url}
+                                                    alt={item.name || `Activo ${index + 1}`}
+                                                    className="w-full h-56 object-cover bg-slate-100"
+                                                    loading="lazy"
+                                                />
+                                                <div className="p-3">
+                                                    <p className="text-sm font-medium text-slate-900 truncate">{item.name || `Adjunto ${index + 1}`}</p>
+                                                    <p className="text-xs text-amber-700 mt-1">Abrir imagen completa</p>
+                                                </div>
+                                            </a>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
 
                             <div className="rounded-2xl border border-slate-200 overflow-hidden">

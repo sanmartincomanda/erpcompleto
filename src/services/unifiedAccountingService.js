@@ -1863,6 +1863,7 @@ export const createActivoFijo = async (activoData) => {
         cuentaPasivoId = '',
         cuentaDepreciacionGastoId,
         cuentaDepreciacionAcumuladaId,
+        adjuntos = [],
         observaciones = '',
         userId,
         userEmail
@@ -2024,6 +2025,7 @@ export const createActivoFijo = async (activoData) => {
             cuentaProveedorId: cuentaContrapartida.id,
             cuentaProveedorCode: cuentaContrapartida.code,
             cuentaProveedorName: cuentaContrapartida.name,
+            adjuntos,
             estado: 'pendiente',
             asientoId: acquisitionEntry.asientoId,
             movimientosContablesIds: acquisitionEntry.movimientos.map((mov) => mov.id),
@@ -2082,6 +2084,7 @@ export const createActivoFijo = async (activoData) => {
         asientoAdquisicionId: acquisitionEntry.asientoId,
         movimientosAdquisicionIds: acquisitionEntry.movimientos.map((mov) => mov.id),
         facturaProveedorId,
+        adjuntos,
         observaciones,
         createdAt: Timestamp.now(),
         createdBy: userId,
