@@ -29,6 +29,7 @@ import DataEntry from './components/DataEntry';
 import ChartOfAccounts from './components/ChartOfAccounts';
 import GastosDiarios from './components/GastosDiarios';
 import ActivosFijos from './components/ActivosFijos';
+import InventarioFisico from './components/InventarioFisico';
 
 // NUEVOS MÓDULOS: Ventas y Gastos
 import Ventas from './components/Ventas';
@@ -159,6 +160,11 @@ function App() {
                     <Route 
                         path="/activos-fijos" 
                         element={<PrivatePage element={<ActivosFijos />} modulo="activos-fijos" />} 
+                    />
+
+                    <Route 
+                        path="/inventario-fisico" 
+                        element={<PrivatePage element={<InventarioFisico />} modulo="inventario-fisico" />} 
                     />
                     
                     {/* Cierre de Caja ERP */}

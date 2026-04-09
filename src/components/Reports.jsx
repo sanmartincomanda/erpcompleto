@@ -15,13 +15,23 @@ import {
     Eye,
     X
 } from 'lucide-react';
-import { format, startOfMonth, endOfMonth } from 'date-fns';
+import { eachMonthOfInterval, format, startOfMonth, endOfMonth } from 'date-fns';
 import { useBranches } from '../hooks/useBranches';
 
 const normalizeTipoMovimiento = (movimiento) =>
     movimiento?.tipo || movimiento?.type || '';
 
 const toAmount = (value) => Number(value || 0);
+const formatCurrency = (amount) =>
+    `C$ ${Number(amount || 0).toLocaleString('es-NI', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    })}`;
+const formatSignedCurrency = (amount) => {
+    const numericAmount = Number(amount || 0);
+    const sign = numericAmount > 0 ? '+' : numericAmount < 0 ? '-' : '';
+    return `${sign}${formatCurrency(Math.abs(numericAmount))}`;
+};
 
 const getMovimientoSucursalId = (movimiento) =>
     movimiento?.sucursalId || movimiento?.branchId || '';
@@ -64,6 +74,8 @@ const Reports = () => {
 
     const [estadoResultados, setEstadoResultados] = useState({
         ingresos: 0,
+        costosContables: 0,
+        diferenciaInventario: 0,
         costos: 0,
         gastos: 0,
         utilidadBruta: 0,
@@ -126,7 +138,7 @@ const Reports = () => {
             setMovimientos(movimientosPeriodo);
 
             let ingresos = 0;
-            let costos = 0;
+            let costosContables = 0;
             let gastos = 0;
             const gastosDetallados = [];
 
@@ -140,7 +152,7 @@ const Reports = () => {
                 if (account.type === 'INGRESO' && movimiento.tipo === 'CREDITO') {
                     ingresos += movimiento.monto;
                 } else if (account.type === 'COSTO' && movimiento.tipo === 'DEBITO') {
-                    costos += movimiento.monto;
+                    costosContables += movimiento.monto;
                 } else if (account.type === 'GASTO' && movimiento.tipo === 'DEBITO') {
                     gastos += movimiento.monto;
                     gastosDetallados.push({
@@ -158,8 +170,24 @@ const Reports = () => {
 
             setDetalleGastosOperativos(gastosDetallados);
 
+            const mesesSeleccionados = new Set(eachMonthOfInterval({
+                start: startOfMonth(new Date(`${fechaDesde}T12:00:00`)),
+                end: startOfMonth(new Date(`${fechaHasta}T12:00:00`))
+            }).map((date) => format(date, 'yyyy-MM')));
+
+            const inventariosSnap = await getDocs(collection(db, 'inventariosFisicosMensuales'));
+            const diferenciaInventario = inventariosSnap.docs
+                .map((docSnapshot) => ({ id: docSnapshot.id, ...docSnapshot.data() }))
+                .filter((inventario) => mesesSeleccionados.has(String(inventario.periodo || '')))
+                .filter((inventario) => !filtroSucursal || inventario.sucursalId === filtroSucursal)
+                .reduce((total, inventario) => total + toAmount(inventario.diferenciaInventario), 0);
+
+            const costos = costosContables + diferenciaInventario;
+
             setEstadoResultados({
                 ingresos,
+                costosContables,
+                diferenciaInventario,
                 costos,
                 gastos,
                 utilidadBruta: ingresos - costos,
@@ -206,13 +234,6 @@ const Reports = () => {
         }
     };
 
-    const formatCurrency = (amount) => {
-        return `C$ ${Number(amount || 0).toLocaleString('es-NI', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        })}`;
-    };
-
     const gastosOperativosAgrupados = useMemo(() => {
         const groups = new Map();
 
@@ -246,14 +267,22 @@ const Reports = () => {
 
     const renderEstadoResultados = () => (
         <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 <div className="bg-green-50 rounded-lg p-4">
                     <p className="text-sm text-green-600 mb-1">Ingresos Totales</p>
                     <p className="text-2xl font-bold text-green-700">{formatCurrency(estadoResultados.ingresos)}</p>
                 </div>
                 <div className="bg-red-50 rounded-lg p-4">
-                    <p className="text-sm text-red-600 mb-1">Costos Totales</p>
+                    <p className="text-sm text-red-600 mb-1">Costos Ajustados</p>
                     <p className="text-2xl font-bold text-red-700">{formatCurrency(estadoResultados.costos)}</p>
+                </div>
+                <div className={`rounded-lg p-4 ${estadoResultados.diferenciaInventario >= 0 ? 'bg-amber-50' : 'bg-emerald-50'}`}>
+                    <p className={`text-sm mb-1 ${estadoResultados.diferenciaInventario >= 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        Diferencia Inventario
+                    </p>
+                    <p className={`text-2xl font-bold ${estadoResultados.diferenciaInventario >= 0 ? 'text-amber-800' : 'text-emerald-700'}`}>
+                        {formatSignedCurrency(estadoResultados.diferenciaInventario)}
+                    </p>
                 </div>
                 <div className="bg-orange-50 rounded-lg p-4">
                     <p className="text-sm text-orange-600 mb-1">Gastos Totales</p>
@@ -269,7 +298,22 @@ const Reports = () => {
                         <span className="text-green-600 font-bold">{formatCurrency(estadoResultados.ingresos)}</span>
                     </div>
                     <div className="flex justify-between items-center py-2 border-b">
-                        <span className="font-medium">Costos</span>
+                        <span className="font-medium">Costos Contables</span>
+                        <span className="text-red-600 font-bold">({formatCurrency(estadoResultados.costosContables)})</span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b">
+                        <div>
+                            <span className="font-medium">Diferencia Inventario</span>
+                            <p className="text-xs text-slate-500 mt-1">
+                                Inventario Inicial - Inventario Final
+                            </p>
+                        </div>
+                        <span className={`font-bold ${estadoResultados.diferenciaInventario >= 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                            {formatSignedCurrency(estadoResultados.diferenciaInventario)}
+                        </span>
+                    </div>
+                    <div className="flex justify-between items-center py-2 border-b bg-slate-50 px-4 rounded">
+                        <span className="font-medium">Costos Ajustados</span>
                         <span className="text-red-600 font-bold">({formatCurrency(estadoResultados.costos)})</span>
                     </div>
                     <div className="flex justify-between items-center py-2 bg-gray-50 px-4 rounded">
