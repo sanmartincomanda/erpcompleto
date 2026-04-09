@@ -725,7 +725,11 @@ export const updateCierreCajaERPStatus = async (cierreId, nuevoEstado, userId) =
     
     const cierre = cierreSnap.data();
     
-    if (nuevoEstado === 'cerrado' && !cierre.cuadre.estaCuadrado) {
+    if (
+        nuevoEstado === 'cerrado' &&
+        !cierre.cuadre.estaCuadrado &&
+        !cierre.ajusteDiferenciaCaja?.aplicado
+    ) {
         throw new Error('No se puede cerrar: El cierre no está cuadrado. Diferencia: ' + 
             cierre.cuadre.diferencia);
     }
