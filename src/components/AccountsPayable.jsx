@@ -20,11 +20,75 @@ import {
     Building2, Plus, Trash2, Save, X, Search, 
     DollarSign, Calendar, CheckCircle, 
     AlertCircle, RefreshCw, FileText, CheckSquare, Square, Filter,
-    TrendingDown, Landmark, Eye, Camera, Upload, Image
+    TrendingDown, Landmark, Eye, Camera, Upload, Image,
+    Users, ArrowUpRight
 } from 'lucide-react';
 
 const MAX_FACTURA_IMAGES = 5;
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const PAYMENT_METHOD_LABELS = {
+    transferencia: 'Transferencia',
+    cheque: 'Cheque',
+    efectivo: 'Efectivo',
+    deposito: 'Deposito'
+};
+const toAmount = (value) => Number(value || 0);
+const getSaldoFactura = (factura) => toAmount(factura?.saldoPendiente ?? factura?.monto);
+const getMontoAbonadoFactura = (factura) => toAmount(factura?.montoAbonado);
+const isFacturaPendiente = (factura) => getSaldoFactura(factura) > 0.01;
+const branchLabel = (branch) => branch?.name || branch?.nombre || branch?.branchName || branch?.tienda || 'Sucursal';
+const formatReceiptCode = (abono) => `#${String(abono?.id || '').slice(-4).toUpperCase() || '----'}`;
+
+const getDueMeta = (factura) => {
+    if (!factura?.fechaVencimiento) {
+        return {
+            isOverdue: false,
+            isUpcoming: false,
+            label: 'Sin vencimiento',
+            badgeClass: 'bg-slate-100 text-slate-500'
+        };
+    }
+
+    const dueDate = new Date(`${factura.fechaVencimiento}T00:00:00`);
+    if (Number.isNaN(dueDate.getTime())) {
+        return {
+            isOverdue: false,
+            isUpcoming: false,
+            label: factura.fechaVencimiento,
+            badgeClass: 'bg-slate-100 text-slate-500'
+        };
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const diffDays = Math.ceil((dueDate.getTime() - today.getTime()) / 86400000);
+
+    if (diffDays < 0) {
+        const overdueDays = Math.abs(diffDays);
+        return {
+            isOverdue: true,
+            isUpcoming: false,
+            label: `${overdueDays} dia${overdueDays === 1 ? '' : 's'} vencida`,
+            badgeClass: 'bg-red-50 text-red-500 ring-1 ring-red-200'
+        };
+    }
+
+    if (diffDays <= 3) {
+        return {
+            isOverdue: false,
+            isUpcoming: true,
+            label: diffDays === 0 ? 'Vence hoy' : `Por vencer (${diffDays}d)`,
+            badgeClass: 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'
+        };
+    }
+
+    return {
+        isOverdue: false,
+        isUpcoming: false,
+        label: factura.fechaVencimiento,
+        badgeClass: 'bg-slate-100 text-slate-500'
+    };
+};
 
 const AccountsPayable = () => {
     const { user } = useAuth();
@@ -46,6 +110,7 @@ const AccountsPayable = () => {
     const [proveedorSeleccionado, setProveedorSeleccionado] = useState('');
     const [searchTerm, setSearchTerm] = useState('');
     const [filtroEstado, setFiltroEstado] = useState('');
+    const [activeTab, setActiveTab] = useState('estado');
     
     const [showFacturaModal, setShowFacturaModal] = useState(false);
     const [showAbonoModal, setShowAbonoModal] = useState(false);
@@ -185,6 +250,85 @@ const AccountsPayable = () => {
     };
 
     const proveedorActual = useMemo(() => proveedores.find(p => p.id === proveedorSeleccionado), [proveedores, proveedorSeleccionado]);
+    const facturasPendientesFiltradas = useMemo(
+        () => facturasFiltradas.filter(isFacturaPendiente),
+        [facturasFiltradas]
+    );
+    const resumenDashboard = useMemo(() => {
+        const saldoTotal = facturasPendientesFiltradas.reduce((sum, factura) => sum + getSaldoFactura(factura), 0);
+        const vencidas = facturasPendientesFiltradas.filter((factura) => getDueMeta(factura).isOverdue);
+        const porVencer = facturasPendientesFiltradas.filter((factura) => getDueMeta(factura).isUpcoming);
+
+        return {
+            saldoTotal,
+            pendientes: facturasPendientesFiltradas.length,
+            vencidasMonto: vencidas.reduce((sum, factura) => sum + getSaldoFactura(factura), 0),
+            vencidasCantidad: vencidas.length,
+            porVencerMonto: porVencer.reduce((sum, factura) => sum + getSaldoFactura(factura), 0),
+            porVencerCantidad: porVencer.length
+        };
+    }, [facturasPendientesFiltradas]);
+    const gruposFacturasPorProveedor = useMemo(() => {
+        const groups = new Map();
+
+        facturasFiltradas.forEach((factura) => {
+            const key = factura.proveedorId || 'sin-proveedor';
+            const existing = groups.get(key) || {
+                proveedorId: factura.proveedorId || '',
+                proveedorNombre: factura.proveedorNombre || factura.cuentaProveedorName || 'Entidad',
+                proveedorCodigo: factura.proveedorCodigo || '',
+                saldoPendiente: 0,
+                totalFacturas: 0,
+                cantidadFacturas: 0,
+                cantidadPendientes: 0,
+                cantidadVencidas: 0,
+                facturas: []
+            };
+
+            const saldoFactura = getSaldoFactura(factura);
+            const dueMeta = getDueMeta(factura);
+            existing.saldoPendiente += saldoFactura;
+            existing.totalFacturas += toAmount(factura.monto);
+            existing.cantidadFacturas += 1;
+            existing.cantidadPendientes += isFacturaPendiente(factura) ? 1 : 0;
+            existing.cantidadVencidas += dueMeta.isOverdue ? 1 : 0;
+            existing.facturas.push(factura);
+            groups.set(key, existing);
+        });
+
+        return Array.from(groups.values())
+            .map((group) => ({
+                ...group,
+                facturas: [...group.facturas].sort((left, right) => {
+                    const dueLeft = String(left.fechaVencimiento || '9999-12-31');
+                    const dueRight = String(right.fechaVencimiento || '9999-12-31');
+                    if (dueLeft !== dueRight) return dueLeft.localeCompare(dueRight);
+                    return String(right.fechaEmision || '').localeCompare(String(left.fechaEmision || ''));
+                })
+            }))
+            .sort((left, right) => right.saldoPendiente - left.saldoPendiente);
+    }, [facturasFiltradas]);
+    const resumenProveedores = useMemo(() => gruposFacturasPorProveedor.map((group) => ({
+        ...group,
+        totalAbonado: group.facturas.reduce((sum, factura) => sum + getMontoAbonadoFactura(factura), 0)
+    })), [gruposFacturasPorProveedor]);
+    const abonosFiltrados = useMemo(() => {
+        let resultado = abonos.filter((abono) => abono.estado !== 'anulado');
+
+        if (proveedorSeleccionado) {
+            resultado = resultado.filter((abono) => abono.proveedorId === proveedorSeleccionado);
+        }
+
+        if (searchTerm) {
+            const queryValue = searchTerm.toLowerCase();
+            resultado = resultado.filter((abono) =>
+                String(abono.proveedorNombre || '').toLowerCase().includes(queryValue) ||
+                String(abono.referencia || '').toLowerCase().includes(queryValue)
+            );
+        }
+
+        return resultado;
+    }, [abonos, proveedorSeleccionado, searchTerm]);
 
     const toggleSeleccionFactura = (fid) => {
         setFacturasSeleccionadas(prev => prev.includes(fid) ? prev.filter(id => id !== fid) : [...prev, fid]);
@@ -235,6 +379,24 @@ const AccountsPayable = () => {
                 };
             });
     }, [abonoForm.montoTotal, facturasSeleccionadasOrdenadas]);
+    const facturasSeleccionadasProveedorNombre = facturasSeleccionadasOrdenadas[0]?.proveedorNombre || facturasSeleccionadasOrdenadas[0]?.cuentaProveedorName || '';
+    const todasFacturasPendientesSeleccionadas = useMemo(() => {
+        if (!facturasPendientesFiltradas.length) return false;
+        return facturasPendientesFiltradas.every((factura) => facturasSeleccionadas.includes(factura.id));
+    }, [facturasPendientesFiltradas, facturasSeleccionadas]);
+
+    const openAbonoForFacturas = (facturasParaPagar) => {
+        const facturasValidas = facturasParaPagar.filter(isFacturaPendiente);
+        if (!facturasValidas.length) return;
+
+        setFacturasSeleccionadas(facturasValidas.map((factura) => factura.id));
+        setSeleccionarTodas(false);
+        setAbonoForm((prev) => ({
+            ...prev,
+            montoTotal: facturasValidas.reduce((sum, factura) => sum + getSaldoFactura(factura), 0)
+        }));
+        setShowAbonoModal(true);
+    };
 
     const resetFacturaAdjuntos = () => {
         revokeLocalImagePreviewItems(facturaAdjuntos);
@@ -689,32 +851,296 @@ const AccountsPayable = () => {
     });
 
     const getAbonosFactura = (fid) => abonos.filter(a => a.facturasIds?.includes(fid));
+    const renderEmptyState = (Icon, title, message) => (
+        <div className="rounded-[28px] border border-slate-200 bg-white/90 px-8 py-14 text-center shadow-sm">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-slate-100">
+                <Icon className="h-8 w-8 text-slate-400" />
+            </div>
+            <h3 className="mt-5 text-xl font-bold text-slate-900">{title}</h3>
+            <p className="mt-2 text-sm text-slate-500">{message}</p>
+        </div>
+    );
+    const tabBaseClass = 'inline-flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition-all';
+    const renderEstadoTab = () => {
+        if (loading) {
+            return (
+                <div className="rounded-[28px] border border-slate-200 bg-white/90 px-8 py-16 text-center shadow-sm">
+                    <RefreshCw className="mx-auto h-10 w-10 animate-spin text-blue-600" />
+                </div>
+            );
+        }
+
+        if (!gruposFacturasPorProveedor.length) {
+            return renderEmptyState(FileText, 'No hay facturas para mostrar', 'Ajusta los filtros o registra una nueva factura de proveedor.');
+        }
+
+        return (
+            <div className="space-y-6">
+                {gruposFacturasPorProveedor.map((group) => (
+                    <div key={group.proveedorId || group.proveedorNombre} className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)] backdrop-blur">
+                        <div className="border-b border-slate-100 bg-gradient-to-r from-white via-slate-50 to-white px-6 py-5">
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                                <div className="flex items-start gap-4">
+                                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                                        <Building2 className="h-6 w-6" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-bold text-slate-900">{group.proveedorNombre}</h3>
+                                        <p className="mt-1 text-sm text-slate-500">
+                                            {group.proveedorCodigo ? `${group.proveedorCodigo} · ` : ''}{group.cantidadFacturas} factura{group.cantidadFacturas === 1 ? '' : 's'}
+                                        </p>
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                                                {group.cantidadPendientes} pendiente{group.cantidadPendientes === 1 ? '' : 's'}
+                                            </span>
+                                            {group.cantidadVencidas > 0 && (
+                                                <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-500 ring-1 ring-red-200">
+                                                    {group.cantidadVencidas} vencida{group.cantidadVencidas === 1 ? '' : 's'}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-col items-start gap-4 lg:items-end">
+                                    <div className="text-left lg:text-right">
+                                        <p className="text-xs font-bold uppercase tracking-[0.24em] text-slate-400">Saldo pendiente</p>
+                                        <p className="mt-2 text-3xl font-black text-red-500">{formatCurrency(group.saldoPendiente)}</p>
+                                    </div>
+                                    {group.cantidadPendientes > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => openAbonoForFacturas(group.facturas.filter(isFacturaPendiente))}
+                                            className="inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-5 py-3 text-sm font-semibold text-white shadow-[0_14px_30px_-18px_rgba(16,185,129,0.9)] transition hover:bg-emerald-600"
+                                        >
+                                            <CheckCircle className="h-4 w-4" />
+                                            Realizar Abono
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="overflow-x-auto px-4 py-4">
+                            <table className="w-full min-w-[920px] text-sm">
+                                <thead>
+                                    <tr className="border-b border-slate-100 text-left text-xs font-bold uppercase tracking-[0.2em] text-slate-400">
+                                        <th className="px-4 py-3 text-center">Sel</th>
+                                        <th className="px-4 py-3">Factura</th>
+                                        <th className="px-4 py-3">Sucursal</th>
+                                        <th className="px-4 py-3">Emision</th>
+                                        <th className="px-4 py-3">Vencimiento</th>
+                                        <th className="px-4 py-3 text-right">Monto</th>
+                                        <th className="px-4 py-3 text-right">Abonado</th>
+                                        <th className="px-4 py-3 text-right">Saldo</th>
+                                        <th className="px-4 py-3 text-center">Accion</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100">
+                                    {group.facturas.map((factura) => {
+                                        const dueMeta = getDueMeta(factura);
+                                        const isSelected = facturasSeleccionadas.includes(factura.id);
+                                        const ordenSeleccion = ordenSeleccionMap.get(factura.id);
+
+                                        return (
+                                            <tr key={factura.id} className={`${isSelected ? 'bg-blue-50/80' : 'hover:bg-slate-50/80'} transition-colors`}>
+                                                <td className="px-4 py-4 text-center">
+                                                    {factura.estado !== 'pagada' ? (
+                                                        <button type="button" onClick={() => toggleSeleccionFactura(factura.id)} className="inline-flex items-center justify-center">
+                                                            {isSelected ? (
+                                                                <div className="flex h-7 w-7 items-center justify-center rounded-xl bg-blue-600 text-white shadow-sm">
+                                                                    <CheckSquare className="h-4 w-4" />
+                                                                </div>
+                                                            ) : (
+                                                                <div className="flex h-7 w-7 items-center justify-center rounded-xl border border-slate-300 bg-white text-slate-400">
+                                                                    <Square className="h-4 w-4" />
+                                                                </div>
+                                                            )}
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-slate-300">-</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-4 py-4">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="font-bold text-slate-900">{factura.numeroFactura || 'S/N'}</p>
+                                                        {ordenSeleccion ? <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[11px] font-bold text-white">Orden {ordenSeleccion}</span> : null}
+                                                        {Array.isArray(factura.adjuntos) && factura.adjuntos.length > 0 ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-200">{factura.adjuntos.length} img</span> : null}
+                                                    </div>
+                                                    <p className="mt-1 max-w-xs truncate text-xs text-slate-500">{factura.descripcion || 'Sin descripcion'}</p>
+                                                </td>
+                                                <td className="px-4 py-4">
+                                                    <span className="inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-600 ring-1 ring-blue-100">
+                                                        {factura.sucursalName || 'General'}
+                                                    </span>
+                                                </td>
+                                                <td className="px-4 py-4 text-slate-600">{factura.fechaEmision || '-'}</td>
+                                                <td className="px-4 py-4">
+                                                    <div className="flex flex-col gap-1">
+                                                        <span className="text-slate-700">{factura.fechaVencimiento || '-'}</span>
+                                                        <span className={`inline-flex w-fit rounded-full px-2.5 py-1 text-[11px] font-semibold ${dueMeta.badgeClass}`}>{dueMeta.label}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="px-4 py-4 text-right text-slate-600">{formatCurrency(factura.monto)}</td>
+                                                <td className="px-4 py-4 text-right font-semibold text-emerald-600">{getMontoAbonadoFactura(factura) > 0 ? formatCurrency(getMontoAbonadoFactura(factura)) : '-'}</td>
+                                                <td className="px-4 py-4 text-right text-lg font-black text-red-500">{formatCurrency(getSaldoFactura(factura))}</td>
+                                                <td className="px-4 py-4 text-center">
+                                                    <div className="flex items-center justify-center gap-1">
+                                                        <button onClick={() => openFacturaDetalle(factura)} className="rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-blue-600" title="Ver factura"><Eye className="h-4 w-4" /></button>
+                                                        {getAbonosFactura(factura.id).length > 0 && <button onClick={() => verAbonosFactura(factura)} className="rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-blue-600" title="Ver abonos"><DollarSign className="h-4 w-4" /></button>}
+                                                        <button onClick={() => handleDeleteFactura(factura)} className="rounded-xl p-2 text-slate-500 transition hover:bg-red-50 hover:text-red-500" title="Eliminar"><Trash2 className="h-4 w-4" /></button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        );
+    };
+    const renderAbonosTab = () => {
+        if (!abonosFiltrados.length) {
+            return renderEmptyState(FileText, 'Sin historial de abonos', 'Todavia no hay pagos registrados para el filtro seleccionado.');
+        }
+
+        return (
+            <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)] backdrop-blur">
+                <div className="border-b border-slate-100 bg-gradient-to-r from-white via-slate-50 to-white px-6 py-5">
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
+                            <FileText className="h-5 w-5" />
+                        </div>
+                        <div>
+                            <h3 className="text-xl font-bold text-slate-900">Historial de Abonos</h3>
+                            <p className="text-sm text-slate-500">Consulta pagos realizados y anula solo cuando sea necesario.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="overflow-x-auto px-4 py-4">
+                    <table className="w-full min-w-[820px] text-sm">
+                        <thead>
+                            <tr className="border-b border-slate-100 text-left text-xs font-bold uppercase tracking-[0.2em] text-slate-400">
+                                <th className="px-4 py-3">Recibo</th>
+                                <th className="px-4 py-3">Fecha</th>
+                                <th className="px-4 py-3">Proveedor</th>
+                                <th className="px-4 py-3">Metodo</th>
+                                <th className="px-4 py-3 text-right">Monto abonado</th>
+                                <th className="px-4 py-3 text-center">Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                            {abonosFiltrados.map((abono) => (
+                                <tr key={abono.id} className="hover:bg-slate-50/80">
+                                    <td className="px-4 py-4 font-bold text-blue-600">{formatReceiptCode(abono)}</td>
+                                    <td className="px-4 py-4 text-slate-600">{abono.fecha || '-'}</td>
+                                    <td className="px-4 py-4 font-semibold text-slate-800">{abono.proveedorNombre || 'Proveedor'}</td>
+                                    <td className="px-4 py-4 text-slate-500">{PAYMENT_METHOD_LABELS[abono.metodoPago] || abono.metodoPago || '-'}</td>
+                                    <td className="px-4 py-4 text-right text-lg font-black text-emerald-600">{formatCurrency(abono.montoTotal)}</td>
+                                    <td className="px-4 py-4 text-center">
+                                        {abono.estado !== 'anulado' ? <button onClick={() => handleAnularAbono(abono)} className="text-xs font-bold uppercase tracking-[0.18em] text-red-500 transition hover:text-red-600">Anular</button> : <span className="rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-500 ring-1 ring-red-200">Anulado</span>}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        );
+    };
+    const renderProveedoresTab = () => {
+        if (!resumenProveedores.length) {
+            return renderEmptyState(Users, 'Sin proveedores con movimientos', 'Cuando existan facturas o saldos, apareceran aqui agrupados.');
+        }
+
+        return (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+                {resumenProveedores.map((proveedor) => (
+                    <div key={proveedor.proveedorId || proveedor.proveedorNombre} className="rounded-[28px] border border-white/70 bg-white/90 p-6 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)] backdrop-blur">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <p className="text-xs font-bold uppercase tracking-[0.24em] text-slate-400">Proveedor</p>
+                                <h3 className="mt-2 text-xl font-bold text-slate-900">{proveedor.proveedorNombre}</h3>
+                                <p className="mt-1 text-sm text-slate-500">{proveedor.cantidadFacturas} factura{proveedor.cantidadFacturas === 1 ? '' : 's'} registradas</p>
+                            </div>
+                            <button type="button" onClick={() => { setProveedorSeleccionado(proveedor.proveedorId); setActiveTab('estado'); }} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-white">
+                                Ver estado
+                                <ArrowUpRight className="h-4 w-4" />
+                            </button>
+                        </div>
+
+                        <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div className="rounded-2xl bg-slate-50 p-4">
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Saldo</p>
+                                <p className="mt-2 text-2xl font-black text-red-500">{formatCurrency(proveedor.saldoPendiente)}</p>
+                            </div>
+                            <div className="rounded-2xl bg-slate-50 p-4">
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Pendientes</p>
+                                <p className="mt-2 text-2xl font-black text-slate-900">{proveedor.cantidadPendientes}</p>
+                            </div>
+                            <div className="rounded-2xl bg-slate-50 p-4">
+                                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Abonado</p>
+                                <p className="mt-2 text-2xl font-black text-emerald-600">{formatCurrency(proveedor.totalAbonado)}</p>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        );
+    };
 
     return (
-        <div className="p-6 max-w-7xl mx-auto">
-            <div className="mb-6">
-                <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-3">
-                    <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center"><DollarSign className="w-6 h-6 text-blue-600" /></div>
-                    Cuentas por Pagar
-                </h1>
+        <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.12),_transparent_24%),radial-gradient(circle_at_top_right,_rgba(251,191,36,0.12),_transparent_22%),linear-gradient(180deg,_#f8fbff_0%,_#f6f8fc_100%)] p-6 max-w-7xl mx-auto">
+            <div className="mb-6 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                    <p className="text-xs font-bold uppercase tracking-[0.32em] text-blue-500">Modulo financiero</p>
+                    <h1 className="mt-3 text-4xl font-black tracking-tight text-slate-900">
+                        Cuentas por <span className="text-blue-600">Pagar</span>
+                    </h1>
+                    <p className="mt-3 max-w-2xl text-sm text-slate-500">
+                        Mantiene la misma operacion contable y de proveedores, pero con una vista mas clara para seguimiento y pagos.
+                    </p>
+                </div>
                 <p className="text-slate-600 mt-2">Facturas de proveedores con asientos contables automáticos</p>
             </div>
 
             {error && <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-red-700"><AlertCircle className="w-5 h-5" />{error}<button onClick={() => setError(null)} className="ml-auto"><X className="w-4 h-4" /></button></div>}
             {success && <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2 text-green-700"><CheckCircle className="w-5 h-5" />{success}</div>}
 
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-3 mb-6">
+                <div className="rounded-[28px] bg-slate-900 px-6 py-5 text-white shadow-[0_22px_50px_-28px_rgba(15,23,42,0.85)]">
+                    <div className="flex items-center justify-between"><p className="text-xs font-bold uppercase tracking-[0.24em] text-slate-400">Saldo total</p><TrendingDown className="h-4 w-4 text-rose-400" /></div>
+                    <p className="mt-4 text-4xl font-black">{formatCurrency(resumenDashboard.saldoTotal)}</p>
+                    <p className="mt-2 text-sm text-slate-400">{resumenDashboard.pendientes} factura{resumenDashboard.pendientes === 1 ? '' : 's'} pendientes</p>
+                </div>
+                <div className="rounded-[28px] border border-red-200 bg-white px-6 py-5 shadow-[0_22px_50px_-36px_rgba(248,113,113,0.45)]">
+                    <div className="flex items-center justify-between"><p className="text-xs font-bold uppercase tracking-[0.24em] text-red-500">Vencidas</p><AlertCircle className="h-4 w-4 text-red-400" /></div>
+                    <p className="mt-4 text-4xl font-black text-red-500">{formatCurrency(resumenDashboard.vencidasMonto)}</p>
+                    <p className="mt-2 text-sm text-red-400">Requieren atencion inmediata · {resumenDashboard.vencidasCantidad} factura{resumenDashboard.vencidasCantidad === 1 ? '' : 's'}</p>
+                </div>
+                <div className="rounded-[28px] border border-amber-200 bg-white px-6 py-5 shadow-[0_22px_50px_-36px_rgba(251,191,36,0.45)]">
+                    <div className="flex items-center justify-between"><p className="text-xs font-bold uppercase tracking-[0.24em] text-amber-500">Por vencer (3d)</p><Calendar className="h-4 w-4 text-amber-400" /></div>
+                    <p className="mt-4 text-4xl font-black text-amber-500">{formatCurrency(resumenDashboard.porVencerMonto)}</p>
+                    <p className="mt-2 text-sm text-amber-400">Proximas a vencer · {resumenDashboard.porVencerCantidad} factura{resumenDashboard.porVencerCantidad === 1 ? '' : 's'}</p>
+                </div>
+            </div>
+
             {/* Filtros */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-6">
+            <div className="rounded-[28px] border border-white/70 bg-white/85 p-5 shadow-sm">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1"><Building2 className="w-4 h-4 inline mr-1" />Proveedor</label>
-                        <select value={proveedorSeleccionado} onChange={(e) => { setProveedorSeleccionado(e.target.value); setFacturasSeleccionadas([]); setSeleccionarTodas(false); }} className="w-full px-3 py-2 border border-slate-300 rounded-lg">
+                        <label className="mb-1.5 block text-sm font-medium text-slate-700"><Building2 className="w-4 h-4 inline mr-1" />Proveedor</label>
+                        <select value={proveedorSeleccionado} onChange={(e) => { setProveedorSeleccionado(e.target.value); setFacturasSeleccionadas([]); setSeleccionarTodas(false); }} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-50">
                             <option value="">Todos los proveedores</option>
                             {proveedores.map(p => <option key={p.id} value={p.id}>{p.codigo} - {p.nombre}</option>)}
                         </select>
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1"><Search className="w-4 h-4 inline mr-1" />Buscar</label>
+                        <label className="mb-1.5 block text-sm font-medium text-slate-700"><Search className="w-4 h-4 inline mr-1" />Buscar</label>
                         <input type="text" placeholder="Número de factura..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
                     </div>
                     <div>
@@ -738,96 +1164,25 @@ const AccountsPayable = () => {
                 )}
             </div>
 
-            {/* Acciones */}
-            <div className="flex flex-wrap gap-3 mb-4">
-                <button onClick={() => { resetFacturaForm(); resetFacturaAdjuntos(); setShowFacturaModal(true); }} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"><Plus className="w-5 h-5" />Nueva Factura</button>
-                {facturasSeleccionadas.length > 0 && (
-                    <button onClick={() => { setAbonoForm(prev => ({ ...prev, montoTotal: totalAPagar })); setShowAbonoModal(true); }} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2">
-                        <DollarSign className="w-5 h-5" />Pagar ({facturasSeleccionadas.length}) - {formatCurrency(totalAPagar)}
-                    </button>
-                )}
+            <div className="rounded-[28px] border border-white/70 bg-white/85 p-3 shadow-sm mb-4">
+                <div className="flex flex-wrap items-center gap-2">
+                    <button onClick={() => { resetFacturaForm(); resetFacturaAdjuntos(); setShowFacturaModal(true); }} className="inline-flex items-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"><Plus className="h-4 w-4" />Nueva Factura</button>
+                    <button type="button" onClick={() => setActiveTab('estado')} className={`${tabBaseClass} ${activeTab === 'estado' ? 'bg-blue-600 text-white shadow-[0_16px_30px_-18px_rgba(37,99,235,0.8)]' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'}`}><TrendingDown className="h-4 w-4" />Estado</button>
+                    <button type="button" onClick={() => setActiveTab('abonos')} className={`${tabBaseClass} ${activeTab === 'abonos' ? 'bg-blue-600 text-white shadow-[0_16px_30px_-18px_rgba(37,99,235,0.8)]' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'}`}><DollarSign className="h-4 w-4" />Abonos</button>
+                    <button type="button" onClick={() => setActiveTab('proveedores')} className={`${tabBaseClass} ${activeTab === 'proveedores' ? 'bg-blue-600 text-white shadow-[0_16px_30px_-18px_rgba(37,99,235,0.8)]' : 'bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50'}`}><Users className="h-4 w-4" />Proveedores</button>
+                    {facturasSeleccionadas.length > 0 && (
+                        <button onClick={() => { setAbonoForm(prev => ({ ...prev, montoTotal: totalAPagar })); setShowAbonoModal(true); }} className="ml-auto inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-white shadow-[0_16px_30px_-18px_rgba(16,185,129,0.9)] transition hover:bg-emerald-600">
+                            <CheckCircle className="h-4 w-4" />
+                            Abonar seleccionadas
+                            <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs font-bold">{facturasSeleccionadas.length}</span>
+                        </button>
+                    )}
+                </div>
             </div>
 
-            {/* Tabla */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                <table className="w-full">
-                    <thead className="bg-slate-50">
-                        <tr>
-                            <th className="px-3 py-3 text-center w-10"><button onClick={toggleSeleccionarTodas}>{seleccionarTodas ? <CheckSquare className="w-5 h-5 text-blue-600" /> : <Square className="w-5 h-5 text-slate-400" />}</button></th>
-                            <th className="px-3 py-3 text-left text-sm font-medium">Factura</th>
-                            <th className="px-3 py-3 text-left text-sm font-medium">Proveedor / Entidad</th>
-                            <th className="px-3 py-3 text-left text-sm font-medium">Sucursal</th>
-                            <th className="px-3 py-3 text-left text-sm font-medium">Emisión</th>
-                            <th className="px-3 py-3 text-left text-sm font-medium">Vence</th>
-                            <th className="px-3 py-3 text-right text-sm font-medium">Monto</th>
-                            <th className="px-3 py-3 text-right text-sm font-medium">Saldo</th>
-                            <th className="px-3 py-3 text-center text-sm font-medium">Estado</th>
-                            <th className="px-3 py-3 text-center text-sm font-medium">Acciones</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                        {loading ? <tr><td colSpan="10" className="px-4 py-8 text-center"><RefreshCw className="w-8 h-8 animate-spin mx-auto text-blue-600" /></td></tr> :
-                         facturasFiltradas.length === 0 ? <tr><td colSpan="10" className="px-4 py-8 text-center text-slate-500"><FileText className="w-12 h-12 mx-auto mb-4 text-slate-300" /><p>No hay facturas</p></td></tr> :
-                         facturasFiltradas.map(f => {
-                            const vencida = f.fechaVencimiento && new Date(f.fechaVencimiento) < new Date() && f.estado !== 'pagada';
-                            const ordenSeleccion = ordenSeleccionMap.get(f.id);
-                            return (
-                                <tr key={f.id} className={`hover:bg-slate-50 ${vencida ? 'bg-red-50' : ''}`}>
-                                    <td className="px-3 py-3 text-center">
-                                        {f.estado !== 'pagada' && (
-                                            <button onClick={() => toggleSeleccionFactura(f.id)} className="inline-flex items-center gap-1">
-                                                {facturasSeleccionadas.includes(f.id) ? <CheckSquare className="w-5 h-5 text-blue-600" /> : <Square className="w-5 h-5 text-slate-400" />}
-                                                {ordenSeleccion ? (
-                                                    <span className="inline-flex items-center justify-center min-w-5 h-5 px-1 rounded-full bg-blue-100 text-blue-700 text-[11px] font-bold">
-                                                        {ordenSeleccion}
-                                                    </span>
-                                                ) : null}
-                                            </button>
-                                        )}
-                                    </td>
-                                    <td className="px-3 py-3">
-                                        <div className="flex items-center gap-2">
-                                            <p className="font-medium">{f.numeroFactura}</p>
-                                            {ordenSeleccion ? (
-                                                <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-xs font-medium">
-                                                    Orden {ordenSeleccion}
-                                                </span>
-                                            ) : null}
-                                            {Array.isArray(f.adjuntos) && f.adjuntos.length > 0 ? (
-                                                <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 text-xs font-medium">
-                                                    {f.adjuntos.length} imagen{f.adjuntos.length === 1 ? '' : 'es'}
-                                                </span>
-                                            ) : null}
-                                        </div>
-                                        {f.descripcion && <p className="text-xs text-slate-500 truncate max-w-xs">{f.descripcion}</p>}
-                                    </td>
-                                    <td className="px-3 py-3 text-sm">
-                                        <p>{f.proveedorNombre || f.cuentaProveedorName || 'Entidad'}</p>
-                                        {f.cuentaProveedorCode && (
-                                            <p className="text-xs text-slate-500">
-                                                {f.cuentaProveedorCode} - {f.cuentaProveedorName}
-                                            </p>
-                                        )}
-                                    </td>
-                                    <td className="px-3 py-3 text-sm">{f.sucursalName || 'General'}</td>
-                                    <td className="px-3 py-3 text-sm">{f.fechaEmision}</td>
-                                    <td className="px-3 py-3 text-sm"><span className={vencida ? 'text-red-600 font-medium' : ''}>{f.fechaVencimiento}{vencida && <span className="text-xs ml-1">(Vencida)</span>}</span></td>
-                                    <td className="px-3 py-3 text-right text-sm">{formatCurrency(f.monto)}</td>
-                                    <td className="px-3 py-3 text-right text-sm font-medium">{formatCurrency(f.saldoPendiente)}</td>
-                                    <td className="px-3 py-3 text-center"><span className={`px-2 py-1 rounded-full text-xs font-medium ${f.estado === 'pagada' ? 'bg-green-100 text-green-700' : f.estado === 'parcial' ? 'bg-amber-100 text-amber-700' : vencida ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>{f.estado === 'pagada' ? 'Pagada' : f.estado === 'parcial' ? 'Parcial' : 'Pendiente'}</span></td>
-                                    <td className="px-3 py-3 text-center">
-                                        <div className="flex items-center justify-center gap-1">
-                                            <button onClick={() => openFacturaDetalle(f)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Ver factura"><Eye className="w-4 h-4" /></button>
-                                            {getAbonosFactura(f.id).length > 0 && <button onClick={() => verAbonosFactura(f)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Ver abonos"><DollarSign className="w-4 h-4" /></button>}
-                                            <button onClick={() => handleDeleteFactura(f)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="Eliminar"><Trash2 className="w-4 h-4" /></button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            );
-                         })}
-                    </tbody>
-                </table>
-            </div>
+            {activeTab === 'estado' && renderEstadoTab()}
+            {activeTab === 'abonos' && renderAbonosTab()}
+            {activeTab === 'proveedores' && renderProveedoresTab()}
 
             {/* Modal Factura */}
             {showFacturaModal && (
