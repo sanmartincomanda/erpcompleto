@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
     collection,
+    deleteDoc,
     doc,
     onSnapshot,
     serverTimestamp,
@@ -13,7 +14,8 @@ import {
     CheckCircle,
     RefreshCw,
     Save,
-    Store
+    Store,
+    Trash2
 } from 'lucide-react';
 import { format, subMonths } from 'date-fns';
 import { db } from '../firebase';
@@ -77,6 +79,7 @@ const InventarioFisico = () => {
     const [records, setRecords] = useState([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
+    const [deletingRecordId, setDeletingRecordId] = useState('');
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
     const [periodoFiltro, setPeriodoFiltro] = useState('');
@@ -223,6 +226,30 @@ const InventarioFisico = () => {
             setError('No se pudo guardar el inventario fisico mensual.');
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleDeleteRecord = async (record) => {
+        if (!record?.id) return;
+
+        const confirmed = window.confirm(
+            `¿Eliminar el inventario físico de ${record.sucursalName || 'la sucursal'} para ${periodLabel(record.periodo)}?`
+        );
+
+        if (!confirmed) return;
+
+        setDeletingRecordId(record.id);
+        setError('');
+        setSuccess('');
+
+        try {
+            await deleteDoc(doc(db, 'inventariosFisicosMensuales', record.id));
+            setSuccess('Inventario fisico mensual eliminado correctamente.');
+        } catch (deleteError) {
+            console.error('Error eliminando inventario fisico:', deleteError);
+            setError('No se pudo eliminar el inventario fisico mensual.');
+        } finally {
+            setDeletingRecordId('');
         }
     };
 
@@ -481,12 +508,13 @@ const InventarioFisico = () => {
                                     <th className="px-4 py-3 text-right font-medium text-slate-700">Final</th>
                                     <th className="px-4 py-3 text-right font-medium text-slate-700">Diferencia</th>
                                     <th className="px-4 py-3 text-left font-medium text-slate-700">Observaciones</th>
+                                    <th className="px-4 py-3 text-center font-medium text-slate-700">Acciones</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 bg-white">
                                 {recordsFiltrados.length === 0 ? (
                                     <tr>
-                                        <td colSpan={6} className="px-4 py-10 text-center text-slate-500">
+                                        <td colSpan={7} className="px-4 py-10 text-center text-slate-500">
                                             No hay inventarios fisicos registrados para el filtro seleccionado.
                                         </td>
                                     </tr>
@@ -508,6 +536,21 @@ const InventarioFisico = () => {
                                             <div className="truncate" title={record.observaciones || ''}>
                                                 {record.observaciones || '-'}
                                             </div>
+                                        </td>
+                                        <td className="px-4 py-3 text-center">
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteRecord(record)}
+                                                className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                                disabled={deletingRecordId === record.id}
+                                            >
+                                                {deletingRecordId === record.id ? (
+                                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                                ) : (
+                                                    <Trash2 className="w-4 h-4" />
+                                                )}
+                                                Eliminar
+                                            </button>
                                         </td>
                                     </tr>
                                 ))}
