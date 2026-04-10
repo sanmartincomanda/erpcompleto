@@ -1,4 +1,4 @@
-// src/components/CierreCajaERP.jsx
+﻿// src/components/CierreCajaERP.jsx
 // Flujo de cierre con efectivo en standby, arqueo y vista de cierres completados
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
@@ -149,6 +149,13 @@ const MAX_CIERRE_FOTOS = 5;
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_CIERRE_ATTACHMENT_BYTES = 95 * 1024;
 const CLAVE_FALTANTE_MAYOR = 'afirmativo';
+const panelClass = 'rounded-[28px] border border-white/70 bg-white/90 p-5 md:p-6 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)] backdrop-blur';
+const mutedPanelClass = 'rounded-[24px] border border-slate-200/80 bg-slate-50/70 p-4 md:p-5';
+const inputClass = 'w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-50';
+const readonlyFieldClass = 'w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700';
+const subtleButtonClass = 'inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50';
+const primaryButtonClass = 'inline-flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_16px_30px_-18px_rgba(37,99,235,0.8)] transition hover:bg-blue-700 disabled:opacity-60';
+const successButtonClass = 'inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_16px_30px_-18px_rgba(5,150,105,0.8)] transition hover:bg-emerald-700 disabled:opacity-60';
 
 const getDisplayCierreCode = (cierre) => {
     if (cierre?.codigoCierre) return cierre.codigoCierre;
@@ -921,8 +928,8 @@ const CierreCajaERP = () => {
         const hasDesglose = rows.length > 0;
 
         return (
-            <div key={field}>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+            <div key={field} className="rounded-[22px] border border-slate-200 bg-white/85 p-4 shadow-sm">
+                <label className="block text-sm font-semibold text-slate-700 mb-2">
                     {config.label}
                 </label>
                 <div className="space-y-2">
@@ -933,17 +940,17 @@ const CierreCajaERP = () => {
                             value={formData[field]}
                             onChange={(e) => handleMetodoPagoTotalChange(field, e.target.value)}
                             placeholder="0.00"
-                            className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500"
+                            className={inputClass}
                         />
                         <button
                             type="button"
                             onClick={() => openDesgloseModal(field)}
-                            className="px-3 py-2 border border-blue-200 text-blue-700 rounded-lg hover:bg-blue-50 whitespace-nowrap"
+                            className="inline-flex items-center justify-center rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 transition hover:bg-blue-100 whitespace-nowrap"
                         >
                             Desglosar
                         </button>
                     </div>
-                    <p className={`text-xs ${hasDesglose ? 'text-blue-600' : 'text-gray-500'}`}>
+                    <p className={`text-xs ${hasDesglose ? 'text-blue-600' : 'text-slate-500'}`}>
                         {hasDesglose
                             ? `${rows.length} monto${rows.length === 1 ? '' : 's'} cargado${rows.length === 1 ? '' : 's'} · Total ${formatCurrency(totalDesglose, config.moneda)}`
                             : 'Puede digitar el total o abrir el desglose para sumar varios montos.'}
@@ -955,13 +962,41 @@ const CierreCajaERP = () => {
 
     // Renderizar formulario de nuevo cierre
     const renderNuevoCierre = () => (
-        <form onSubmit={handleGuardar} className="space-y-6">
+        <form onSubmit={handleGuardar} className="space-y-5 lg:space-y-6">
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+                <div className="rounded-[26px] bg-slate-900 px-5 py-4 text-white shadow-[0_22px_50px_-28px_rgba(15,23,42,0.85)]">
+                    <p className="text-xs font-bold uppercase tracking-[0.22em] text-slate-400">Ingreso SICAR</p>
+                    <p className="mt-3 text-2xl md:text-3xl font-black">{formatCurrency(totales.totalIngresoRegistrado)}</p>
+                </div>
+                <div className="rounded-[26px] border border-emerald-200 bg-white px-5 py-4 shadow-[0_22px_50px_-36px_rgba(16,185,129,0.35)]">
+                    <p className="text-xs font-bold uppercase tracking-[0.22em] text-emerald-600">Ventas contado</p>
+                    <p className="mt-3 text-2xl md:text-3xl font-black text-emerald-600">{formatCurrency(totales.totalVentasContado)}</p>
+                </div>
+                <div className="rounded-[26px] border border-amber-200 bg-white px-5 py-4 shadow-[0_22px_50px_-36px_rgba(251,191,36,0.35)]">
+                    <p className="text-xs font-bold uppercase tracking-[0.22em] text-amber-600">Credito neto</p>
+                    <p className="mt-3 text-2xl md:text-3xl font-black text-amber-600">{formatCurrency(totales.totalFacturasCredito)}</p>
+                </div>
+                <div className="rounded-[26px] border border-blue-200 bg-white px-5 py-4 shadow-[0_22px_50px_-36px_rgba(59,130,246,0.35)]">
+                    <p className="text-xs font-bold uppercase tracking-[0.22em] text-blue-600">Abonos recibidos</p>
+                    <p className="mt-3 text-2xl md:text-3xl font-black text-blue-600">{formatCurrency(totales.totalAbonosRecibidos)}</p>
+                </div>
+            </div>
             {/* Información General */}
-            <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+            <div className={panelClass}>
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between mb-5">
+                    <div>
+                        <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                     <FileText className="w-5 h-5 text-blue-600" />
                     Información General
-                </h3>
+                        </h3>
+                        <p className="text-sm text-slate-500 mt-1">
+                            Configure la jornada, la sucursal y el responsable del cierre.
+                        </p>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                        Cierre listo para móvil, tablet y escritorio.
+                    </div>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Fecha *</label>
@@ -1055,7 +1090,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Efectivo en Standby */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Building2 className="w-5 h-5 text-blue-600" />
                     Efectivo en Standby
@@ -1071,7 +1106,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Datos SICAR */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <TrendingUp className="w-5 h-5 text-green-600" />
                     Datos SICAR
@@ -1142,7 +1177,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Métodos de Pago */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Wallet className="w-5 h-5 text-purple-600" />
                     Métodos de Pago
@@ -1249,7 +1284,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Retenciones */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold flex items-center gap-2">
                         <TrendingDown className="w-5 h-5 text-red-600" />
@@ -1334,7 +1369,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Gastos de Caja */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <div className="flex items-center justify-between mb-4">
                     <h3 className="text-lg font-semibold flex items-center gap-2">
                         <TrendingDown className="w-5 h-5 text-orange-600" />
@@ -1416,7 +1451,7 @@ const CierreCajaERP = () => {
             </div>
 
             {false && (
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Calculator className="w-5 h-5 text-blue-600" />
                     Arqueo de Efectivo
@@ -1509,7 +1544,6 @@ const CierreCajaERP = () => {
                 <p className="mt-3 text-sm text-gray-500">
                     La diferencia de caja solo se generará si confirmas el arqueo.
                 </p>
-                
                 {arqueoTotales.totalArqueo > 0 && (
                     <>
                     <div className="mt-4 p-4 bg-gray-50 rounded-lg">
@@ -1549,8 +1583,8 @@ const CierreCajaERP = () => {
                                     </p>
                                     <p className="text-sm text-amber-800 mt-1">
                                         {tipoAjusteDiferencia === 'faltante'
-                                            ? 'El faltante se registrarÃ¡ en Otros Gastos Diversos.'
-                                            : 'El sobrante se registrarÃ¡ en Otros Ingresos Diversos.'}
+                                            ? 'El faltante se registrará en Otros Gastos Diversos.'
+                                            : 'El sobrante se registrará en Otros Ingresos Diversos.'}
                                     </p>
                                     {formData.ajusteDiferenciaCaja?.aplicado && (
                                         <p className="text-sm text-green-700 mt-2 font-medium">
@@ -1587,7 +1621,7 @@ const CierreCajaERP = () => {
             )}
 
             {/* Resumen y Cuadre */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                     <Calculator className="w-5 h-5 text-blue-600" />
                     Resumen y Cuadre
@@ -1658,8 +1692,8 @@ const CierreCajaERP = () => {
                                 </p>
                                 <p className="text-sm text-amber-800 mt-1">
                                     {tipoAjusteDiferencia === 'faltante'
-                                        ? 'La diferencia faltante se registrarÃ¡ en Otros Gastos Diversos.'
-                                        : 'La diferencia sobrante se registrarÃ¡ en Otros Ingresos Diversos.'}
+                                        ? 'La diferencia faltante se registrará en Otros Gastos Diversos.'
+                                        : 'La diferencia sobrante se registrará en Otros Ingresos Diversos.'}
                                 </p>
                                 {formData.ajusteDiferenciaCaja?.aplicado && (
                                     <p className="text-sm text-green-700 mt-2 font-medium">
@@ -1693,7 +1727,7 @@ const CierreCajaERP = () => {
             </div>
 
             {/* Observaciones */}
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <div className="flex items-center justify-between gap-4 mb-4">
                     <div>
                         <h3 className="text-lg font-semibold flex items-center gap-2">
@@ -1763,7 +1797,7 @@ const CierreCajaERP = () => {
                 )}
             </div>
 
-            <div className="bg-white rounded-lg shadow p-6">
+            <div className={panelClass}>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Observaciones</label>
                 <textarea
                     value={formData.observaciones}
@@ -1790,11 +1824,11 @@ const CierreCajaERP = () => {
             )}
 
             {/* Botones */}
-            <div className="flex gap-4">
+            <div className={`${panelClass} flex flex-col gap-3 md:flex-row`}>
                 <button
                     type="submit"
                     disabled={submitting}
-                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                    className={`${primaryButtonClass} flex-1`}
                 >
                     {submitting ? (
                         <>
@@ -1812,7 +1846,7 @@ const CierreCajaERP = () => {
                     type="button"
                     onClick={handleCerrar}
                     disabled={submitting || (!totales.estaCuadrado && !formData.ajusteDiferenciaCaja?.aplicado)}
-                    className="flex-1 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                    className={`${successButtonClass} flex-1`}
                 >
                     {submitting && submitAction === 'cerrar' ? (
                         <>
@@ -2076,66 +2110,64 @@ const CierreCajaERP = () => {
     const renderCierresCompletados = () => (
         <div className="space-y-4">
             {cierresCompletados.length === 0 ? (
-                <div className="bg-white rounded-lg shadow p-8 text-center">
-                    <Lock className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-                    <h3 className="text-lg font-semibold text-gray-900">No hay cierres completados</h3>
-                    <p className="text-gray-600">Los cierres procesados aparecerán aquí</p>
+                <div className={`${panelClass} py-10 text-center`}>
+                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-slate-100">
+                        <Lock className="h-8 w-8 text-slate-400" />
+                    </div>
+                    <h3 className="text-lg font-bold text-slate-900">No hay cierres completados</h3>
+                    <p className="mt-2 text-slate-500">Los cierres procesados aparecerán aquí.</p>
                 </div>
             ) : (
                 <div className="grid gap-4">
                     {cierresCompletados.map((cierre) => (
                         <div
                             key={cierre.id}
-                            className="bg-white rounded-lg shadow p-6 hover:shadow-md transition-shadow"
+                            className="overflow-hidden rounded-[28px] border border-white/70 bg-white/90 p-5 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)] backdrop-blur md:p-6"
                         >
-                            <div className="flex items-start justify-between">
-                                <div className="flex-1">
-                                    <div className="flex items-center gap-3 mb-2">
-                                        <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full text-sm font-medium flex items-center gap-1">
-                                            <Lock className="w-3 h-3" />
+                            <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+                                <div className="flex-1 space-y-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                                            <Lock className="h-3.5 w-3.5" />
                                             {cierre.estado === 'completado' ? 'Completado' : 'Cerrado'}
                                         </span>
-                                        <span className="bg-slate-100 text-slate-800 px-3 py-1 rounded-full text-sm font-semibold">
+                                        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
                                             {getDisplayCierreCode(cierre)}
                                         </span>
-                                        <span className="text-gray-500">
-                                            {cierre.fecha}
-                                        </span>
-                                        <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm">
+                                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
                                             {cierre.caja}
                                         </span>
+                                        <span className="text-sm text-slate-500">{cierre.fecha}</span>
                                     </div>
-                                    
-                                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-4">
-                                        <div>
-                                            <p className="text-sm text-gray-500">Cajero</p>
-                                            <p className="font-medium">{cierre.cajero}</p>
+
+                                    <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Cajero</p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">{cierre.cajero}</p>
                                         </div>
-                                        <div>
-                                            <p className="text-sm text-gray-500">Total Ingreso</p>
-                                            <p className="font-medium text-lg">
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Ingreso</p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">
                                                 {formatCurrency(cierre.totalIngreso ?? cierre.cuadre?.totalIngreso)}
                                             </p>
                                         </div>
-                                        <div>
-                                            <p className="text-sm text-gray-500">Diferencia</p>
-                                            <p className={`font-medium ${
-                                                cierre.cuadre?.estaCuadrado 
-                                                    ? 'text-green-600' 
-                                                    : 'text-red-600'
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Diferencia</p>
+                                            <p className={`mt-2 text-sm font-semibold ${
+                                                cierre.cuadre?.estaCuadrado ? 'text-emerald-600' : 'text-red-600'
                                             }`}>
                                                 {formatCurrency(cierre.cuadre?.diferencia || 0)}
                                             </p>
                                         </div>
-                                        <div>
-                                            <p className="text-sm text-gray-500">Movimientos</p>
-                                            <p className="font-medium">
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Movimientos</p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">
                                                 {cierre.totalMovimientos || cierre.movimientosContablesIds?.length || 0} registrados
                                             </p>
                                         </div>
-                                        <div>
-                                            <p className="text-sm text-gray-500">Fotos</p>
-                                            <p className="font-medium">
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
+                                            <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Fotos</p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">
                                                 {Array.isArray(cierre.fotos) && cierre.fotos.length > 0
                                                     ? `${cierre.fotos.length} adjunta${cierre.fotos.length === 1 ? '' : 's'}`
                                                     : 'Sin fotos'}
@@ -2143,10 +2175,10 @@ const CierreCajaERP = () => {
                                         </div>
                                     </div>
                                 </div>
-                                
+
                                 <button
                                     onClick={() => handleViewCierre(cierre)}
-                                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 flex items-center gap-2"
+                                    className={`${primaryButtonClass} w-full xl:w-auto`}
                                 >
                                     <Eye className="w-4 h-4" />
                                     Ver Detalle
@@ -2158,7 +2190,6 @@ const CierreCajaERP = () => {
             )}
         </div>
     );
-
     // Renderizar vista de cierre (modo lectura)
     const renderViewCierre = () => {
         if (!viewingCierre) return null;
@@ -2486,65 +2517,94 @@ const CierreCajaERP = () => {
     };
 
     return (
-        <div className="p-6">
+        <div className="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.14),_transparent_32%),linear-gradient(180deg,#f8fbff_0%,#eef4ff_46%,#f8fafc_100%)] px-3 py-4 sm:px-4 md:px-6 lg:px-8">
+            <div className="mx-auto max-w-7xl">
             {/* Header */}
-            <div className="mb-6">
-                <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                    <Calculator className="w-8 h-8 text-blue-600" />
-                    Cierre de Caja ERP
-                </h1>
-                <p className="text-gray-600 mt-1">
-                    Gestione los cierres de caja y su vinculación al plan de cuentas
-                </p>
+            <div className="mb-6 overflow-hidden rounded-[32px] border border-white/70 bg-slate-900 px-5 py-6 text-white shadow-[0_30px_80px_-40px_rgba(15,23,42,0.95)] md:px-8 md:py-7">
+                <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.28em] text-slate-200">
+                    <Calculator className="h-4 w-4 text-blue-300" />
+                    Operación protegida
+                </div>
+                <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                    <div className="max-w-3xl">
+                        <h1 className="text-3xl font-black tracking-tight md:text-4xl">
+                            Cierre de Caja ERP
+                        </h1>
+                        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">
+                            Misma operación, con una experiencia más clara, dinámica y lista para teléfono, tablet y escritorio.
+                        </p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <div className="rounded-[24px] border border-white/10 bg-white/10 px-4 py-3 backdrop-blur">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-300">Ingreso</p>
+                            <p className="mt-2 text-xl font-black">{formatCurrency(totales.totalIngresoRegistrado)}</p>
+                        </div>
+                        <div className="rounded-[24px] border border-emerald-400/20 bg-emerald-400/10 px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-emerald-100">Cuadre</p>
+                            <p className={`mt-2 text-xl font-black ${totales.estaCuadrado ? 'text-emerald-300' : 'text-amber-200'}`}>
+                                {totales.estaCuadrado ? 'OK' : formatCurrency(totales.diferencia)}
+                            </p>
+                        </div>
+                        <div className="rounded-[24px] border border-blue-400/20 bg-blue-400/10 px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-blue-100">Retenciones</p>
+                            <p className="mt-2 text-xl font-black text-blue-100">{formatCurrency(totales.totalRetenciones)}</p>
+                        </div>
+                        <div className="rounded-[24px] border border-orange-400/20 bg-orange-400/10 px-4 py-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-orange-100">Gastos</p>
+                            <p className="mt-2 text-xl font-black text-orange-100">{formatCurrency(totales.totalGastosCaja)}</p>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-2 mb-6 border-b">
-                <button
-                    onClick={() => setActiveTab('nuevo')}
-                    className={`px-4 py-2 font-medium ${
-                        activeTab === 'nuevo' 
-                            ? 'text-blue-600 border-b-2 border-blue-600' 
-                            : 'text-gray-600 hover:text-gray-800'
-                    }`}
-                >
-                    <Plus className="w-4 h-4 inline mr-1" />
-                    Nuevo Cierre
-                </button>
-                <button
-                    onClick={() => {
-                        setActiveTab('pendientes');
-                        loadCierres();
-                    }}
-                    className={`px-4 py-2 font-medium ${
-                        activeTab === 'pendientes' 
-                            ? 'text-blue-600 border-b-2 border-blue-600' 
-                            : 'text-gray-600 hover:text-gray-800'
-                    }`}
-                >
-                    <Unlock className="w-4 h-4 inline mr-1" />
-                    Pendientes
-                </button>
-                <button
-                    onClick={() => {
-                        setActiveTab('completados');
-                        loadCierres();
-                    }}
-                    className={`px-4 py-2 font-medium ${
-                        activeTab === 'completados' 
-                            ? 'text-blue-600 border-b-2 border-blue-600' 
-                            : 'text-gray-600 hover:text-gray-800'
-                    }`}
-                >
-                    <Lock className="w-4 h-4 inline mr-1" />
-                    Completados
-                </button>
+            <div className="mb-6 overflow-x-auto">
+                <div className="inline-flex min-w-full gap-2 rounded-[24px] border border-white/70 bg-white/80 p-2 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.8)] backdrop-blur sm:min-w-0">
+                    <button
+                        onClick={() => setActiveTab('nuevo')}
+                        className={`inline-flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                            activeTab === 'nuevo'
+                                ? 'bg-blue-600 text-white shadow-[0_18px_30px_-18px_rgba(37,99,235,0.8)]'
+                                : 'text-slate-600 hover:bg-slate-50'
+                        }`}
+                    >
+                        <Plus className="w-4 h-4" />
+                        Nuevo Cierre
+                    </button>
+                    <button
+                        onClick={() => {
+                            setActiveTab('pendientes');
+                            loadCierres();
+                        }}
+                        className={`inline-flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                            activeTab === 'pendientes'
+                                ? 'bg-blue-600 text-white shadow-[0_18px_30px_-18px_rgba(37,99,235,0.8)]'
+                                : 'text-slate-600 hover:bg-slate-50'
+                        }`}
+                    >
+                        <Unlock className="w-4 h-4" />
+                        Pendientes
+                    </button>
+                    <button
+                        onClick={() => {
+                            setActiveTab('completados');
+                            loadCierres();
+                        }}
+                        className={`inline-flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                            activeTab === 'completados'
+                                ? 'bg-blue-600 text-white shadow-[0_18px_30px_-18px_rgba(37,99,235,0.8)]'
+                                : 'text-slate-600 hover:bg-slate-50'
+                        }`}
+                    >
+                        <Lock className="w-4 h-4" />
+                        Completados
+                    </button>
+                </div>
             </div>
-
             {/* Contenido según tab */}
             {activeTab === 'nuevo' && renderNuevoCierre()}
             {activeTab === 'pendientes' && (
-                <div className="text-center py-8 text-gray-500">
+                <div className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-12 text-center text-slate-500 shadow-[0_24px_60px_-36px_rgba(15,23,42,0.4)]">
                     Funcionalidad de cierres pendientes en desarrollo
                 </div>
             )}
@@ -2610,8 +2670,12 @@ const CierreCajaERP = () => {
                     </div>
                 </div>
             )}
+            </div>
         </div>
     );
 };
 
 export default CierreCajaERP;
+
+
+
