@@ -201,10 +201,12 @@ const ConciliacionBancaria = () => {
         );
     }, [getBancoAccounts]);
 
-    const getLastCompletedForAccount = (accountId) =>
+    const getLastFinishedForAccount = (accountId) =>
         sortByUpdatedAt(
             reconciliaciones.filter(
-                (item) => item.accountId === accountId && item.estado === 'completada'
+                (item) =>
+                    item.accountId === accountId &&
+                    ['completada', 'cerrada'].includes(item.estado)
             )
         )[0] || null;
 
@@ -229,7 +231,7 @@ const ConciliacionBancaria = () => {
     });
 
     const buildBlankReconciliation = (account) => {
-        const lastCompleted = getLastCompletedForAccount(account.id);
+        const lastCompleted = getLastFinishedForAccount(account.id);
 
         return hydrateReconciliation(
             {
@@ -479,6 +481,10 @@ const ConciliacionBancaria = () => {
         activeBankTransactions.length > 0 &&
         Math.abs(statementDifference) <= 0.01 &&
         Math.abs(bookDifference) <= 0.01;
+    const canCloseDraft = !!selectedAccount && activeBankTransactions.length > 0;
+    const isLockedReconciliation = ['completada', 'cerrada'].includes(
+        activeReconciliation?.estado
+    );
 
     const accountSessions = useMemo(() => {
         if (!activeReconciliation?.accountId) return reconciliaciones;
@@ -711,6 +717,36 @@ const ConciliacionBancaria = () => {
         }
     };
 
+    const handleCloseDraft = async () => {
+        if (!activeReconciliation) return;
+        if (!canCloseDraft) {
+            setError(
+                'Necesitas cargar al menos un estado bancario antes de terminar este archivo.'
+            );
+            return;
+        }
+
+        setSaving(true);
+        setError('');
+        setSuccess('');
+
+        try {
+            await persistReconciliation(
+                activeReconciliation,
+                'cerrada',
+                'Archivo bancario terminado. Puedes iniciar otra conciliación con un nuevo CSV cuando quieras.'
+            );
+        } catch (saveError) {
+            console.error('Error cerrando conciliación bancaria:', saveError);
+            setError(
+                saveError.message ||
+                    'No se pudo terminar la conciliación bancaria actual.'
+            );
+        } finally {
+            setSaving(false);
+        }
+    };
+
     const handleNewReconciliation = () => {
         if (!selectedAccount) return;
         setActiveReconciliation(buildBlankReconciliation(selectedAccount));
@@ -744,7 +780,7 @@ const ConciliacionBancaria = () => {
     const toggleBankSelection = (transactionId) => {
         if (
             matchedBankIds.has(transactionId) ||
-            activeReconciliation?.estado === 'completada'
+            isLockedReconciliation
         ) {
             return;
         }
@@ -759,7 +795,7 @@ const ConciliacionBancaria = () => {
     const toggleMovimientoSelection = (movimientoId) => {
         if (
             matchedMovimientoIds.has(movimientoId) ||
-            activeReconciliation?.estado === 'completada'
+            isLockedReconciliation
         ) {
             return;
         }
@@ -961,7 +997,7 @@ const ConciliacionBancaria = () => {
         setRegisterForm(createRegisterForm(null, account?.currency || 'NIO'));
         setError('');
         setSuccess(
-            item.estado === 'completada'
+            ['completada', 'cerrada'].includes(item.estado)
                 ? 'Conciliación histórica cargada en modo consulta.'
                 : 'Conciliación cargada para continuar trabajando.'
         );
@@ -1191,7 +1227,7 @@ const ConciliacionBancaria = () => {
                         <button
                             type="button"
                             onClick={handleSaveDraft}
-                            disabled={saving || !activeReconciliation}
+                            disabled={saving || !activeReconciliation || isLockedReconciliation}
                             className="inline-flex items-center gap-2 rounded-2xl border border-emerald-400/30 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {saving ? (
@@ -1200,6 +1236,15 @@ const ConciliacionBancaria = () => {
                                 <Save className="h-4 w-4" />
                             )}
                             Guardar borrador
+                        </button>
+                        <button
+                            type="button"
+                            onClick={handleCloseDraft}
+                            disabled={saving || !canCloseDraft || isLockedReconciliation}
+                            className="inline-flex items-center gap-2 rounded-2xl border border-amber-300/30 bg-amber-400/10 px-4 py-3 text-sm font-semibold text-amber-50 transition hover:bg-amber-400/20 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            <Clock3 className="h-4 w-4" />
+                            Terminar archivo
                         </button>
                         <button
                             type="button"
@@ -1414,7 +1459,9 @@ const ConciliacionBancaria = () => {
                                             className={`rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${
                                                 item.estado === 'completada'
                                                     ? 'bg-emerald-100 text-emerald-700'
-                                                    : 'bg-amber-100 text-amber-700'
+                                                    : item.estado === 'cerrada'
+                                                      ? 'bg-slate-200 text-slate-700'
+                                                      : 'bg-amber-100 text-amber-700'
                                             }`}
                                         >
                                             {item.estado}
@@ -1545,7 +1592,7 @@ const ConciliacionBancaria = () => {
                                     type="button"
                                     onClick={openRegisterMissingModal}
                                     disabled={
-                                        activeReconciliation?.estado === 'completada' ||
+                                        isLockedReconciliation ||
                                         selectedBankIds.length !== 1
                                     }
                                     className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1556,7 +1603,7 @@ const ConciliacionBancaria = () => {
                                     type="button"
                                     onClick={handleMatchSelection}
                                     disabled={
-                                        activeReconciliation?.estado === 'completada' ||
+                                        isLockedReconciliation ||
                                         !selectedBankIds.length ||
                                         !selectedMovimientoIds.length
                                     }
@@ -1657,7 +1704,7 @@ const ConciliacionBancaria = () => {
                                                                     type="button"
                                                                     onClick={() => toggleBankSelection(transaction.id)}
                                                                     className="text-blue-600 disabled:text-slate-300"
-                                                                    disabled={isMatched || activeReconciliation?.estado === 'completada'}
+                                                                    disabled={isMatched || isLockedReconciliation}
                                                                 >
                                                                     {isSelected ? <CheckSquare className="h-5 w-5" /> : <Square className="h-5 w-5" />}
                                                                 </button>
@@ -1745,7 +1792,7 @@ const ConciliacionBancaria = () => {
                                                                     type="button"
                                                                     onClick={() => toggleMovimientoSelection(movimiento.id)}
                                                                     className="text-emerald-600 disabled:text-slate-300"
-                                                                    disabled={isMatched || activeReconciliation?.estado === 'completada'}
+                                                                    disabled={isMatched || isLockedReconciliation}
                                                                 >
                                                                     {isSelected ? <CheckSquare className="h-5 w-5" /> : <Square className="h-5 w-5" />}
                                                                 </button>
@@ -1829,7 +1876,7 @@ const ConciliacionBancaria = () => {
                                                 <p className="text-sm font-semibold text-emerald-700">
                                                     {formatSignedAmount(group.totalERP, selectedAccount?.currency || 'NIO')}
                                                 </p>
-                                                {activeReconciliation?.estado !== 'completada' && (
+                                                {!isLockedReconciliation && (
                                                     <button
                                                         type="button"
                                                         onClick={() => handleUndoMatch(group.id)}
