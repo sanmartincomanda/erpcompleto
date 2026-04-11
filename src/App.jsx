@@ -30,6 +30,7 @@ import ChartOfAccounts from './components/ChartOfAccounts';
 import GastosDiarios from './components/GastosDiarios';
 import ActivosFijos from './components/ActivosFijos';
 import InventarioFisico from './components/InventarioFisico';
+import ConciliacionBancaria from './components/ConciliacionBancaria';
 
 // NUEVOS MÓDULOS: Ventas y Gastos
 import Ventas from './components/Ventas';
@@ -165,6 +166,11 @@ function App() {
                     <Route 
                         path="/inventario-fisico" 
                         element={<PrivatePage element={<InventarioFisico />} modulo="inventario-fisico" />} 
+                    />
+
+                    <Route 
+                        path="/conciliacion-bancaria" 
+                        element={<PrivatePage element={<ConciliacionBancaria />} modulo="conciliacion-bancaria" />} 
                     />
                     
                     {/* Cierre de Caja ERP */}

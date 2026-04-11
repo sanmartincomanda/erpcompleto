@@ -41,6 +41,7 @@ const Header = ({ sidebarOpen: externalSidebarOpen, setSidebarOpen: externalSetS
                 { path: '/plan-cuentas', label: 'Plan de Cuentas', icon: BookOpen },
                 { path: '/activos-fijos', label: 'Activos Fijos', icon: Package },
                 { path: '/inventario-fisico', label: 'Inventario Fisico', icon: Store },
+                { path: '/conciliacion-bancaria', label: 'Conciliación Bancaria', icon: Landmark },
                 { path: '/movimientos', label: 'Movimientos Contables', icon: FileText },
                 { path: '/asientos', label: 'Asientos Contables', icon: Calculator },
                 { path: '/ajustes-manuales', label: 'Ajustes Manuales', icon: TrendingUp },

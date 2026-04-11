@@ -292,6 +292,13 @@ const Inicio = () => {
             color: 'bg-amber-500'
         },
         {
+            title: 'Conciliación Bancaria',
+            description: 'Suba CSV del banco y concilie contra libros',
+            icon: Landmark,
+            path: '/conciliacion-bancaria',
+            color: 'bg-cyan-500'
+        },
+        {
             title: 'Ventas y Gastos',
             description: 'Registre operaciones diarias',
             icon: DollarSign,
