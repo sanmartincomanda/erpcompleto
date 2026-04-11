@@ -343,10 +343,11 @@ const ChartOfAccounts = () => {
             }
 
             const currency = String(account.currency || 'NIO').toUpperCase();
-            const ownBalance = Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
+            const ownBalanceNio = Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
+            const ownBalanceUsd = Number(liveBalancesByAccountId[account.id]?.balanceUSD ?? account.balanceUSD ?? 0);
 
-            let nio = currency === 'USD' ? 0 : ownBalance;
-            let usd = currency === 'USD' ? ownBalance : 0;
+            let nio = ownBalanceNio;
+            let usd = currency === 'USD' ? ownBalanceUsd : 0;
 
             const children = accountChildrenByParentId[accountId] || [];
             children.forEach((child) => {
@@ -374,8 +375,20 @@ const ChartOfAccounts = () => {
         }
 
         if (!account.isGroup) {
+            const currency = String(account.currency || 'NIO').toUpperCase();
+            const liveBalance = liveBalancesByAccountId[account.id] || {};
+            const balanceNio = Number(liveBalance.balance ?? account.balance ?? 0);
+            const balanceUsd = Number(liveBalance.balanceUSD ?? account.balanceUSD ?? 0);
+
+            if (currency === 'USD') {
+                return {
+                    primary: formatCurrency(balanceUsd, 'USD'),
+                    secondary: formatCurrency(balanceNio, 'NIO')
+                };
+            }
+
             return {
-                primary: formatCurrency(getDisplayedAccountBalance(account), account.currency),
+                primary: formatCurrency(balanceNio, 'NIO'),
                 secondary: ''
             };
         }
@@ -384,17 +397,17 @@ const ChartOfAccounts = () => {
         const hasNio = Math.abs(totals.nio) >= 0.005;
         const hasUsd = Math.abs(totals.usd) >= 0.005;
 
+        if (!hasNio && hasUsd) {
+            return {
+                primary: formatCurrency(totals.usd, 'USD'),
+                secondary: formatCurrency(totals.nio, 'NIO')
+            };
+        }
+
         if (hasNio && hasUsd) {
             return {
                 primary: formatCurrency(totals.nio, 'NIO'),
                 secondary: formatCurrency(totals.usd, 'USD')
-            };
-        }
-
-        if (hasUsd) {
-            return {
-                primary: formatCurrency(totals.usd, 'USD'),
-                secondary: ''
             };
         }
 
@@ -618,14 +631,15 @@ const ChartOfAccounts = () => {
                     </span>
                     
                     <span className={`text-right ${account.isGroup ? 'w-44' : 'w-32'}`}>
-                        <span className={`block font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                        <span className={`inline-flex items-baseline justify-end gap-2 font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
                             {balanceDisplay.primary}
-                        </span>
+                        
                         {balanceDisplay.secondary && (
-                            <span className="block text-xs font-mono text-slate-500">
+                            <span className="text-[11px] font-mono text-slate-500">
                                 {balanceDisplay.secondary}
                             </span>
                         )}
+                        </span>
                     </span>
                     
                     <div className="flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -825,14 +839,15 @@ const ChartOfAccounts = () => {
                                         {account.subType || '-'}
                                     </td>
                                     <td className="px-4 py-3 text-right">
-                                        <span className={`block font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                                        <span className={`inline-flex items-baseline justify-end gap-2 font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
                                             {balanceDisplay.primary}
-                                        </span>
+                                        
                                         {balanceDisplay.secondary && (
-                                            <span className="block text-xs font-mono text-slate-500">
+                                            <span className="text-[11px] font-mono text-slate-500">
                                                 {balanceDisplay.secondary}
                                             </span>
                                         )}
+                                        </span>
                                     </td>
                                     <td className="px-4 py-3 text-center">
                                         {account.isActive !== false ? (
