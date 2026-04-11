@@ -84,6 +84,8 @@ const getNatureByType = (type) =>
 const getSucursalMovimiento = (movimiento) =>
     movimiento?.sucursalName || movimiento?.branchName || movimiento?.tienda || 'General';
 
+const DEFAULT_USD_RATE = 36.5;
+
 const ChartOfAccounts = () => {
     // Estados principales
     const [accounts, setAccounts] = useState([]);
@@ -307,9 +309,94 @@ const ChartOfAccounts = () => {
         return balances;
     }, [accounts, allMovimientos]);
 
+    const exchangeRateByAccountId = useMemo(() => {
+        const accountsById = new Map();
+        const accountsByCode = new Map();
+        const rates = {};
+
+        accounts.forEach((account) => {
+            accountsById.set(account.id, account);
+            const normalizedCode = normalizeCode(account.code);
+            if (normalizedCode) {
+                accountsByCode.set(normalizedCode, account);
+            }
+        });
+
+        allMovimientos
+            .slice()
+            .sort((a, b) => getMovimientoTimestampValue(b) - getMovimientoTimestampValue(a))
+            .forEach((movimiento) => {
+                const movimientoAccountId = getMovimientoAccountId(movimiento);
+                const movimientoAccountCode = normalizeCode(getMovimientoAccountCode(movimiento));
+                const account =
+                    (movimientoAccountId && accountsById.get(movimientoAccountId)) ||
+                    (movimientoAccountCode && accountsByCode.get(movimientoAccountCode));
+
+                if (!account || String(account.currency || 'NIO').toUpperCase() !== 'USD') {
+                    return;
+                }
+
+                if (rates[account.id]) return;
+
+                const montoNio = Math.abs(Number(movimiento.monto || 0));
+                const montoUsd = Math.abs(Number(movimiento.montoUSD || 0));
+
+                if (montoNio > 0.005 && montoUsd > 0.005) {
+                    rates[account.id] = montoNio / montoUsd;
+                }
+            });
+
+        accounts.forEach((account) => {
+            if (String(account.currency || 'NIO').toUpperCase() !== 'USD') return;
+            if (rates[account.id]) return;
+
+            const accountBalance = Math.abs(Number(account.balance || 0));
+            const accountBalanceUsd = Math.abs(Number(account.balanceUSD || 0));
+
+            if (accountBalance > 0.005 && accountBalanceUsd > 0.005) {
+                rates[account.id] = accountBalance / accountBalanceUsd;
+            }
+        });
+
+        return rates;
+    }, [accounts, allMovimientos]);
+
+    const resolvedBalancesByAccountId = useMemo(() => {
+        return accounts.reduce((accumulator, account) => {
+            if (account.isGroup) return accumulator;
+
+            const currency = String(account.currency || 'NIO').toUpperCase();
+            const liveBalance = liveBalancesByAccountId[account.id] || {};
+            const balanceNioRaw = Number(liveBalance.balance ?? account.balance ?? 0);
+            const balanceUsdRaw = Number(liveBalance.balanceUSD ?? account.balanceUSD ?? 0);
+            const exchangeRate = Number(exchangeRateByAccountId[account.id] || DEFAULT_USD_RATE) || DEFAULT_USD_RATE;
+
+            let balanceNio = balanceNioRaw;
+            let balanceUsd = balanceUsdRaw;
+
+            if (currency === 'USD') {
+                if (Math.abs(balanceUsd) < 0.005 && Math.abs(balanceNio) >= 0.005) {
+                    balanceUsd = balanceNio / exchangeRate;
+                }
+
+                if (Math.abs(balanceNio) < 0.005 && Math.abs(balanceUsd) >= 0.005) {
+                    balanceNio = balanceUsd * exchangeRate;
+                }
+            }
+
+            accumulator[account.id] = {
+                balance: balanceNio,
+                balanceUSD: balanceUsd,
+                exchangeRate
+            };
+
+            return accumulator;
+        }, {});
+    }, [accounts, exchangeRateByAccountId, liveBalancesByAccountId]);
+
     const getDisplayedAccountBalance = (account) => {
         if (!account || account.isGroup) return Number(account?.balance || 0);
-        return Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
+        return Number(resolvedBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
     };
 
     const accountChildrenByParentId = useMemo(() => {
@@ -343,8 +430,9 @@ const ChartOfAccounts = () => {
             }
 
             const currency = String(account.currency || 'NIO').toUpperCase();
-            const ownBalanceNio = Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
-            const ownBalanceUsd = Number(liveBalancesByAccountId[account.id]?.balanceUSD ?? account.balanceUSD ?? 0);
+            const resolvedBalance = resolvedBalancesByAccountId[account.id] || {};
+            const ownBalanceNio = Number(resolvedBalance.balance ?? account.balance ?? 0);
+            const ownBalanceUsd = Number(resolvedBalance.balanceUSD ?? account.balanceUSD ?? 0);
 
             let nio = ownBalanceNio;
             let usd = currency === 'USD' ? ownBalanceUsd : 0;
@@ -367,53 +455,50 @@ const ChartOfAccounts = () => {
         });
 
         return cache;
-    }, [accounts, accountChildrenByParentId, liveBalancesByAccountId]);
+    }, [accounts, accountChildrenByParentId, resolvedBalancesByAccountId]);
 
     const getAccountBalanceDisplay = (account) => {
         if (!account) {
-            return { primary: formatCurrency(0), secondary: '' };
+            return {
+                primary: formatCurrency(0),
+                usdAmount: '',
+                usdBadge: ''
+            };
         }
 
         if (!account.isGroup) {
             const currency = String(account.currency || 'NIO').toUpperCase();
-            const liveBalance = liveBalancesByAccountId[account.id] || {};
-            const balanceNio = Number(liveBalance.balance ?? account.balance ?? 0);
-            const balanceUsd = Number(liveBalance.balanceUSD ?? account.balanceUSD ?? 0);
+            const resolvedBalance = resolvedBalancesByAccountId[account.id] || {};
+            const balanceNio = Number(resolvedBalance.balance ?? account.balance ?? 0);
+            const balanceUsd = Number(resolvedBalance.balanceUSD ?? account.balanceUSD ?? 0);
+            const hasUsdAmount = Math.abs(balanceUsd) >= 0.005;
 
             if (currency === 'USD') {
                 return {
-                    primary: formatCurrency(balanceUsd, 'USD'),
-                    secondary: formatCurrency(balanceNio, 'NIO')
+                    primary: formatCurrency(balanceNio, 'NIO'),
+                    usdAmount: hasUsdAmount ? formatCurrency(balanceUsd, 'USD') : '',
+                    usdBadge: hasUsdAmount
+                        ? `Monto dólares: ${formatCurrency(balanceUsd, 'USD')}`
+                        : ''
                 };
             }
 
             return {
                 primary: formatCurrency(balanceNio, 'NIO'),
-                secondary: ''
+                usdAmount: '',
+                usdBadge: ''
             };
         }
 
         const totals = aggregatedBalancesByAccountId[account.id] || { nio: 0, usd: 0 };
-        const hasNio = Math.abs(totals.nio) >= 0.005;
         const hasUsd = Math.abs(totals.usd) >= 0.005;
-
-        if (!hasNio && hasUsd) {
-            return {
-                primary: formatCurrency(totals.usd, 'USD'),
-                secondary: formatCurrency(totals.nio, 'NIO')
-            };
-        }
-
-        if (hasNio && hasUsd) {
-            return {
-                primary: formatCurrency(totals.nio, 'NIO'),
-                secondary: formatCurrency(totals.usd, 'USD')
-            };
-        }
 
         return {
             primary: formatCurrency(totals.nio, 'NIO'),
-            secondary: ''
+            usdAmount: hasUsd ? formatCurrency(totals.usd, 'USD') : '',
+            usdBadge: hasUsd
+                ? `Monto dólares: ${formatCurrency(totals.usd, 'USD')}`
+                : ''
         };
     };
 
@@ -599,7 +684,7 @@ const ChartOfAccounts = () => {
 
                     return (
                 <div 
-                    className={`group flex items-center gap-2 px-3 py-2 hover:bg-slate-50 cursor-pointer border-l-2 ${
+                    className={`group flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer border-l-2 ${
                         selectedAccount?.id === account.id 
                             ? 'bg-blue-50 border-blue-500' 
                             : 'border-transparent'
@@ -622,23 +707,27 @@ const ChartOfAccounts = () => {
                     
                     <span className="font-mono text-sm text-slate-600 w-28">{account.code}</span>
                     
-                    <span className={`flex-1 text-sm ${account.isGroup ? 'font-semibold' : ''}`}>
+                    <span className={`flex-1 min-w-0 text-sm ${account.isGroup ? 'font-semibold' : ''}`}>
                         {account.name}
                     </span>
                     
                     <span className={`px-2 py-0.5 rounded-full text-xs ${getTypeInfo(account.type).color}`}>
                         {account.type}
                     </span>
-                    
-                    <span className={`text-right ${account.isGroup ? 'w-44' : 'w-32'}`}>
-                        <span className={`inline-flex items-baseline justify-end gap-2 font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
-                            {balanceDisplay.primary}
-                        
-                        {balanceDisplay.secondary && (
-                            <span className="text-[11px] font-mono text-slate-500">
-                                {balanceDisplay.secondary}
+
+                    <span className="hidden min-w-[250px] justify-center md:inline-flex">
+                        {balanceDisplay.usdBadge ? (
+                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                                {balanceDisplay.usdBadge}
                             </span>
+                        ) : (
+                            <span className="h-7" />
                         )}
+                    </span>
+                    
+                    <span className="w-40 text-right">
+                        <span className={`inline-flex items-baseline justify-end font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                            {balanceDisplay.primary}
                         </span>
                     </span>
                     
@@ -813,7 +902,8 @@ const ChartOfAccounts = () => {
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Nombre</th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Tipo</th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Subtipo</th>
-                                <th className="px-4 py-3 text-right text-sm font-medium text-slate-700">Saldo</th>
+                                <th className="px-4 py-3 text-center text-sm font-medium text-slate-700">Monto Dólares</th>
+                                <th className="px-4 py-3 text-right text-sm font-medium text-slate-700">Saldo C$</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-slate-700">Estado</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-slate-700">Acciones</th>
                             </tr>
@@ -838,15 +928,18 @@ const ChartOfAccounts = () => {
                                     <td className="px-4 py-3 text-sm text-slate-600">
                                         {account.subType || '-'}
                                     </td>
-                                    <td className="px-4 py-3 text-right">
-                                        <span className={`inline-flex items-baseline justify-end gap-2 font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
-                                            {balanceDisplay.primary}
-                                        
-                                        {balanceDisplay.secondary && (
-                                            <span className="text-[11px] font-mono text-slate-500">
-                                                {balanceDisplay.secondary}
+                                    <td className="px-4 py-3 text-center">
+                                        {balanceDisplay.usdBadge ? (
+                                            <span className="inline-flex rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                                                {balanceDisplay.usdBadge}
                                             </span>
+                                        ) : (
+                                            <span className="text-sm text-slate-300">-</span>
                                         )}
+                                    </td>
+                                    <td className="px-4 py-3 text-right">
+                                        <span className={`inline-flex items-baseline justify-end font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                                            {balanceDisplay.primary}
                                         </span>
                                     </td>
                                     <td className="px-4 py-3 text-center">
