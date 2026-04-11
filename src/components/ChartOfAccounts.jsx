@@ -312,6 +312,98 @@ const ChartOfAccounts = () => {
         return Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
     };
 
+    const accountChildrenByParentId = useMemo(() => {
+        return accounts.reduce((accumulator, account) => {
+            if (!account.parentId) return accumulator;
+
+            if (!accumulator[account.parentId]) {
+                accumulator[account.parentId] = [];
+            }
+
+            accumulator[account.parentId].push(account);
+            return accumulator;
+        }, {});
+    }, [accounts]);
+
+    const aggregatedBalancesByAccountId = useMemo(() => {
+        const accountMap = new Map(accounts.map((account) => [account.id, account]));
+        const cache = {};
+        const visiting = new Set();
+
+        const computeBalance = (accountId) => {
+            if (cache[accountId]) return cache[accountId];
+            if (visiting.has(accountId)) return { nio: 0, usd: 0 };
+
+            visiting.add(accountId);
+
+            const account = accountMap.get(accountId);
+            if (!account) {
+                visiting.delete(accountId);
+                return { nio: 0, usd: 0 };
+            }
+
+            const currency = String(account.currency || 'NIO').toUpperCase();
+            const ownBalance = Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
+
+            let nio = currency === 'USD' ? 0 : ownBalance;
+            let usd = currency === 'USD' ? ownBalance : 0;
+
+            const children = accountChildrenByParentId[accountId] || [];
+            children.forEach((child) => {
+                const childBalance = computeBalance(child.id);
+                nio += childBalance.nio;
+                usd += childBalance.usd;
+            });
+
+            const result = { nio, usd };
+            cache[accountId] = result;
+            visiting.delete(accountId);
+            return result;
+        };
+
+        accounts.forEach((account) => {
+            computeBalance(account.id);
+        });
+
+        return cache;
+    }, [accounts, accountChildrenByParentId, liveBalancesByAccountId]);
+
+    const getAccountBalanceDisplay = (account) => {
+        if (!account) {
+            return { primary: formatCurrency(0), secondary: '' };
+        }
+
+        if (!account.isGroup) {
+            return {
+                primary: formatCurrency(getDisplayedAccountBalance(account), account.currency),
+                secondary: ''
+            };
+        }
+
+        const totals = aggregatedBalancesByAccountId[account.id] || { nio: 0, usd: 0 };
+        const hasNio = Math.abs(totals.nio) >= 0.005;
+        const hasUsd = Math.abs(totals.usd) >= 0.005;
+
+        if (hasNio && hasUsd) {
+            return {
+                primary: formatCurrency(totals.nio, 'NIO'),
+                secondary: formatCurrency(totals.usd, 'USD')
+            };
+        }
+
+        if (hasUsd) {
+            return {
+                primary: formatCurrency(totals.usd, 'USD'),
+                secondary: ''
+            };
+        }
+
+        return {
+            primary: formatCurrency(totals.nio, 'NIO'),
+            secondary: ''
+        };
+    };
+
     // Estructurar cuentas en árbol
     const accountTree = useMemo(() => {
         const map = {};
@@ -490,6 +582,7 @@ const ChartOfAccounts = () => {
             <div key={account.id} className="">
                 {(() => {
                     const shouldExpand = normalizedSearchTerm ? true : expandedGroups[account.id];
+                    const balanceDisplay = getAccountBalanceDisplay(account);
 
                     return (
                 <div 
@@ -524,11 +617,16 @@ const ChartOfAccounts = () => {
                         {account.type}
                     </span>
                     
-                    {!account.isGroup && (
-                        <span className="text-sm font-mono text-right w-32">
-                            {formatCurrency(getDisplayedAccountBalance(account), account.currency)}
+                    <span className={`text-right ${account.isGroup ? 'w-44' : 'w-32'}`}>
+                        <span className={`block font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                            {balanceDisplay.primary}
                         </span>
-                    )}
+                        {balanceDisplay.secondary && (
+                            <span className="block text-xs font-mono text-slate-500">
+                                {balanceDisplay.secondary}
+                            </span>
+                        )}
+                    </span>
                     
                     <div className="flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
                         <button
@@ -701,13 +799,16 @@ const ChartOfAccounts = () => {
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Nombre</th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Tipo</th>
                                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-700">Subtipo</th>
-                                <th className="px-4 py-3 text-right text-sm font-medium text-slate-700">Saldo C$</th>
+                                <th className="px-4 py-3 text-right text-sm font-medium text-slate-700">Saldo</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-slate-700">Estado</th>
                                 <th className="px-4 py-3 text-center text-sm font-medium text-slate-700">Acciones</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                            {filteredAccounts.map((account) => (
+                            {filteredAccounts.map((account) => {
+                                const balanceDisplay = getAccountBalanceDisplay(account);
+
+                                return (
                                 <tr key={account.id} className="hover:bg-slate-50 group">
                                     <td className="px-4 py-3 font-mono text-sm text-slate-600">{account.code}</td>
                                     <td className="px-4 py-3">
@@ -723,8 +824,15 @@ const ChartOfAccounts = () => {
                                     <td className="px-4 py-3 text-sm text-slate-600">
                                         {account.subType || '-'}
                                     </td>
-                                    <td className="px-4 py-3 text-right font-mono">
-                                        {formatCurrency(getDisplayedAccountBalance(account), account.currency)}
+                                    <td className="px-4 py-3 text-right">
+                                        <span className={`block font-mono text-sm ${account.isGroup ? 'font-semibold text-slate-700' : ''}`}>
+                                            {balanceDisplay.primary}
+                                        </span>
+                                        {balanceDisplay.secondary && (
+                                            <span className="block text-xs font-mono text-slate-500">
+                                                {balanceDisplay.secondary}
+                                            </span>
+                                        )}
                                     </td>
                                     <td className="px-4 py-3 text-center">
                                         {account.isActive !== false ? (
@@ -761,7 +869,8 @@ const ChartOfAccounts = () => {
                                         </div>
                                     </td>
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                     
