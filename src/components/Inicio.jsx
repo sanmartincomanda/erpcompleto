@@ -11,6 +11,7 @@ import {
     Building2,
     BarChart3,
     Settings,
+    Landmark,
     TrendingUp,
     TrendingDown,
     Package,
