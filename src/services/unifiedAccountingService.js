@@ -441,10 +441,53 @@ export const registerAccountingEntry = async (entryData) => {
     };
 };
 
+const normalizeAccountCode = (code) => String(code || '').replace(/\./g, '').trim();
+
+const getMovimientosForAccount = async (accountId, accountCode = '') => {
+    const movimientosRef = collection(db, 'movimientosContables');
+    const snapshots = [];
+    const codeCandidates = Array.from(
+        new Set([accountCode, normalizeAccountCode(accountCode)].filter(Boolean))
+    );
+
+    if (accountId) {
+        snapshots.push(await getDocs(query(movimientosRef, where('accountId', '==', accountId))));
+        snapshots.push(await getDocs(query(movimientosRef, where('cuentaId', '==', accountId))));
+    }
+
+    for (const code of codeCandidates) {
+        snapshots.push(await getDocs(query(movimientosRef, where('accountCode', '==', code))));
+        snapshots.push(await getDocs(query(movimientosRef, where('cuentaCode', '==', code))));
+    }
+
+    const uniqueDocs = new Map();
+
+    snapshots.forEach((snapshot) => {
+        snapshot.docs.forEach((docSnapshot) => {
+            uniqueDocs.set(docSnapshot.id, docSnapshot);
+        });
+    });
+
+    const normalizedTargetCode = normalizeAccountCode(accountCode);
+
+    return Array.from(uniqueDocs.values()).filter((docSnapshot) => {
+        const mov = docSnapshot.data();
+        const movimientoAccountId = mov.accountId || mov.cuentaId || mov.cuenta?.id || '';
+        const movimientoAccountCode = normalizeAccountCode(
+            mov.accountCode || mov.cuentaCode || mov.cuenta?.code || ''
+        );
+
+        return (
+            (accountId && movimientoAccountId === accountId) ||
+            (normalizedTargetCode && movimientoAccountCode === normalizedTargetCode)
+        );
+    });
+};
+
 /**
  * Actualiza el saldo de una cuenta contable
  */
-const updateAccountBalance = async (accountId, tipo, monto, montoUSD) => {
+const updateAccountBalance = async (accountId, tipo, monto, montoUSD, accountCodeOverride = '') => {
     try {
         const accountRef = doc(db, 'planCuentas', accountId);
         const accountSnap = await getDoc(accountRef);
@@ -452,16 +495,15 @@ const updateAccountBalance = async (accountId, tipo, monto, montoUSD) => {
         if (!accountSnap.exists()) return;
         
         const account = accountSnap.data();
+        const accountCode = accountCodeOverride || account.code || '';
         const nature = inferAccountNature(account);
         const isDeudora = nature === 'DEUDORA';
-        const movimientosSnap = await getDocs(
-            query(collection(db, 'movimientosContables'), where('accountId', '==', accountId))
-        );
+        const movimientosDocs = await getMovimientosForAccount(accountId, accountCode);
 
         let newBalance = 0;
         let newBalanceUSD = 0;
 
-        movimientosSnap.docs.forEach((movDoc) => {
+        movimientosDocs.forEach((movDoc) => {
             const mov = movDoc.data();
             const tipoMovimiento = mov.tipo || mov.type;
             const multiplier =
@@ -483,6 +525,114 @@ const updateAccountBalance = async (accountId, tipo, monto, montoUSD) => {
     } catch (err) {
         console.error('Error actualizando saldo:', err);
     }
+};
+
+const syncAsientoContable = async (asientoId) => {
+    if (!asientoId) return;
+
+    const asientoRef = doc(db, 'asientosContables', asientoId);
+    const movimientosSnap = await getDocs(
+        query(collection(db, 'movimientosContables'), where('asientoId', '==', asientoId))
+    );
+
+    if (movimientosSnap.empty) {
+        await deleteDoc(asientoRef);
+        return;
+    }
+
+    let totalDebitos = 0;
+    let totalCreditos = 0;
+    let firstMovimiento = null;
+
+    const movimientos = movimientosSnap.docs.map((movDoc) => {
+        const movimiento = movDoc.data();
+        const tipoMovimiento = movimiento.tipo || movimiento.type || '';
+        const monto = toNumber(movimiento.monto);
+
+        if (!firstMovimiento) {
+            firstMovimiento = movimiento;
+        }
+
+        if (tipoMovimiento === 'DEBITO') {
+            totalDebitos += monto;
+        } else if (tipoMovimiento === 'CREDITO') {
+            totalCreditos += monto;
+        }
+
+        return {
+            cuentaId: movimiento.accountId,
+            cuentaCode: movimiento.accountCode,
+            cuentaName: movimiento.accountName,
+            tipo: tipoMovimiento,
+            monto,
+            montoUSD: toNumber(movimiento.montoUSD),
+            descripcion: movimiento.descripcion || ''
+        };
+    });
+
+    await updateDoc(asientoRef, {
+        fecha: firstMovimiento?.fecha || '',
+        descripcion: firstMovimiento?.descripcion || '',
+        referencia: firstMovimiento?.referencia || '',
+        documentoId: firstMovimiento?.documentoId || '',
+        documentoTipo: firstMovimiento?.documentoTipo || '',
+        moduloOrigen: firstMovimiento?.moduloOrigen || '',
+        sucursalId: firstMovimiento?.sucursalId || '',
+        sucursalName: firstMovimiento?.sucursalName || '',
+        totalDebitos,
+        totalCreditos,
+        movimientos,
+        updatedAt: Timestamp.now()
+    });
+};
+
+export const deleteMovimientoContable = async (movimientoId) => {
+    if (!movimientoId) {
+        throw new Error('Movimiento contable no especificado');
+    }
+
+    const movimientoRef = doc(db, 'movimientosContables', movimientoId);
+    const movimientoSnap = await getDoc(movimientoRef);
+
+    if (!movimientoSnap.exists()) {
+        throw new Error('Movimiento contable no encontrado');
+    }
+
+    const movimiento = movimientoSnap.data();
+    let accountId = movimiento.accountId || movimiento.cuentaId || movimiento.cuenta?.id || '';
+    let accountCode = movimiento.accountCode || movimiento.cuentaCode || movimiento.cuenta?.code || '';
+    const asientoId = movimiento.asientoId || '';
+
+    if (!accountId && accountCode) {
+        const cuenta = await getCuentaByCode(accountCode) || await getCuentaByCode(normalizeAccountCode(accountCode));
+        if (cuenta?.id) {
+            accountId = cuenta.id;
+            accountCode = cuenta.code || accountCode;
+        }
+    }
+
+    await deleteDoc(movimientoRef);
+
+    if (accountId) {
+        await updateAccountBalance(
+            accountId,
+            movimiento.tipo || movimiento.type,
+            movimiento.monto,
+            movimiento.montoUSD || 0,
+            accountCode
+        );
+    }
+
+    if (asientoId) {
+        await syncAsientoContable(asientoId);
+    }
+
+    return {
+        id: movimientoId,
+        accountId,
+        accountCode,
+        asientoId
+    };
 };
 
 // ============================================
@@ -2860,5 +3010,6 @@ export default {
     createAjusteManual,
     aprobarAjusteManual,
     rechazarAjusteManual,
+    deleteMovimientoContable,
     resetERPDatabase
 };

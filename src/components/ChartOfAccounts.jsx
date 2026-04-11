@@ -257,6 +257,61 @@ const ChartOfAccounts = () => {
         return { debitos, creditos, saldo: debitos - creditos };
     }, [movimientosFiltrados]);
 
+    const liveBalancesByAccountId = useMemo(() => {
+        const accountsById = new Map();
+        const accountsByCode = new Map();
+        const balances = {};
+
+        accounts.forEach((account) => {
+            accountsById.set(account.id, account);
+            const normalizedCode = normalizeCode(account.code);
+            if (normalizedCode) {
+                accountsByCode.set(normalizedCode, account);
+            }
+            if (!account.isGroup) {
+                balances[account.id] = {
+                    balance: 0,
+                    balanceUSD: 0
+                };
+            }
+        });
+
+        allMovimientos.forEach((movimiento) => {
+            const tipoMovimiento = normalizeTipoMovimiento(movimiento);
+            if (!['DEBITO', 'CREDITO'].includes(tipoMovimiento)) return;
+
+            const movimientoAccountId = getMovimientoAccountId(movimiento);
+            const movimientoAccountCode = normalizeCode(getMovimientoAccountCode(movimiento));
+            const account =
+                (movimientoAccountId && accountsById.get(movimientoAccountId)) ||
+                (movimientoAccountCode && accountsByCode.get(movimientoAccountCode));
+
+            if (!account || account.isGroup) return;
+
+            const nature = account.nature || getNatureByType(account.type);
+            const isDeudora = nature === 'DEUDORA';
+            const multiplier =
+                (tipoMovimiento === 'DEBITO' && isDeudora) ||
+                (tipoMovimiento === 'CREDITO' && !isDeudora)
+                    ? 1
+                    : -1;
+
+            if (!balances[account.id]) {
+                balances[account.id] = { balance: 0, balanceUSD: 0 };
+            }
+
+            balances[account.id].balance += Number(movimiento.monto || 0) * multiplier;
+            balances[account.id].balanceUSD += Number(movimiento.montoUSD || 0) * multiplier;
+        });
+
+        return balances;
+    }, [accounts, allMovimientos]);
+
+    const getDisplayedAccountBalance = (account) => {
+        if (!account || account.isGroup) return Number(account?.balance || 0);
+        return Number(liveBalancesByAccountId[account.id]?.balance ?? account.balance ?? 0);
+    };
+
     // Estructurar cuentas en árbol
     const accountTree = useMemo(() => {
         const map = {};
@@ -471,7 +526,7 @@ const ChartOfAccounts = () => {
                     
                     {!account.isGroup && (
                         <span className="text-sm font-mono text-right w-32">
-                            {formatCurrency(account.balance, account.currency)}
+                            {formatCurrency(getDisplayedAccountBalance(account), account.currency)}
                         </span>
                     )}
                     
@@ -669,7 +724,7 @@ const ChartOfAccounts = () => {
                                         {account.subType || '-'}
                                     </td>
                                     <td className="px-4 py-3 text-right font-mono">
-                                        {formatCurrency(account.balance, account.currency)}
+                                        {formatCurrency(getDisplayedAccountBalance(account), account.currency)}
                                     </td>
                                     <td className="px-4 py-3 text-center">
                                         {account.isActive !== false ? (

@@ -1,8 +1,9 @@
 // src/components/ERP/MovimientosContables.jsx - Movimientos Contables con Edición
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, onSnapshot, where, getDocs, doc, updateDoc, deleteDoc, Timestamp } from 'firebase/firestore';
+import { collection, query, orderBy, onSnapshot, where, getDocs, doc, updateDoc, Timestamp } from 'firebase/firestore';
 import { db } from '../../firebase';
 import { useBranches } from '../../hooks/useBranches';
+import { deleteMovimientoContable } from '../../services/unifiedAccountingService';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import {
@@ -259,7 +260,7 @@ const MovimientosContables = () => {
         if (!confirm('¿Eliminar este movimiento contable?\n\nEsta acción no se puede deshacer.')) return;
         
         try {
-            await deleteDoc(doc(db, 'movimientosContables', movimiento.id));
+            await deleteMovimientoContable(movimiento.id);
             setSuccess('Movimiento eliminado');
             setTimeout(() => setSuccess(null), 3000);
         } catch (err) {
