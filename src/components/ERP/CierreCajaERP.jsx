@@ -2523,7 +2523,7 @@ const CierreCajaERP = () => {
             <div className="mb-6 overflow-hidden rounded-[32px] border border-white/70 bg-slate-900 px-5 py-6 text-white shadow-[0_30px_80px_-40px_rgba(15,23,42,0.95)] md:px-8 md:py-7">
                 <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-bold uppercase tracking-[0.28em] text-slate-200">
                     <Calculator className="h-4 w-4 text-blue-300" />
-                    Operación protegida
+                    Tesorería
                 </div>
                 <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                     <div className="max-w-3xl">
@@ -2531,7 +2531,7 @@ const CierreCajaERP = () => {
                             Cierre de Caja ERP
                         </h1>
                         <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 md:text-base">
-                            Misma operación, con una experiencia más clara, dinámica y lista para teléfono, tablet y escritorio.
+                            Control de cierres, cuadre operativo y seguimiento de caja.
                         </p>
                     </div>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

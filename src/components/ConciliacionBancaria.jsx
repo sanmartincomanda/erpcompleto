@@ -4,6 +4,7 @@ import {
     collection,
     doc,
     onSnapshot,
+    setDoc,
     Timestamp,
     updateDoc
 } from 'firebase/firestore';
@@ -27,6 +28,10 @@ import {
 import { db } from '../firebase';
 import { useAuth } from '../context/AuthContext';
 import { usePlanCuentas } from '../hooks/useUnifiedAccounting';
+import {
+    DOCUMENT_TYPES,
+    registerAccountingEntry
+} from '../services/unifiedAccountingService';
 import {
     guessColumnMapping,
     mapCsvRowsToTransactions,
@@ -142,9 +147,32 @@ const sortByUpdatedAt = (items = []) =>
         return rightValue - leftValue;
     });
 
+const isTransferAccount = (account = {}) => {
+    const subType = String(account.subType || '').toLowerCase();
+    const code = normalizeCode(account.code);
+
+    return (
+        ['caja', 'banco', 'transito', 'clientes', 'proveedores'].includes(subType) ||
+        code.startsWith('1101') ||
+        code.startsWith('1103') ||
+        code.startsWith('2101')
+    );
+};
+
+const createRegisterForm = (transaction = null, currency = 'NIO') => ({
+    bankTransactionId: transaction?.id || '',
+    category: normalizeNumber(transaction?.signedAmount) < 0 ? 'gasto' : 'ingreso',
+    fecha: transaction?.fecha || formatDateInput(),
+    descripcion: transaction?.descripcion || '',
+    referencia: transaction?.referencia || '',
+    counterpartAccountId: '',
+    notas: '',
+    tipoCambio: currency === 'USD' ? '36.50' : '1'
+});
+
 const ConciliacionBancaria = () => {
     const { user } = useAuth();
-    const { getBancoAccounts, loading: loadingAccounts } = usePlanCuentas();
+    const { accounts, getBancoAccounts, loading: loadingAccounts } = usePlanCuentas();
 
     const [reconciliaciones, setReconciliaciones] = useState([]);
     const [movimientos, setMovimientos] = useState([]);
@@ -161,6 +189,9 @@ const ConciliacionBancaria = () => {
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
+    const [showRegisterModal, setShowRegisterModal] = useState(false);
+    const [registeringEntry, setRegisteringEntry] = useState(false);
+    const [registerForm, setRegisterForm] = useState(createRegisterForm());
 
     const bankAccounts = useMemo(() => {
         const accounts = [...getBancoAccounts('NIO'), ...getBancoAccounts('USD')];
@@ -387,6 +418,14 @@ const ConciliacionBancaria = () => {
         [activeBankTransactions, selectedBankIds]
     );
 
+    const selectedBankTransactionForRegistration = useMemo(
+        () =>
+            activeBankTransactions.find(
+                (transaction) => transaction.id === registerForm.bankTransactionId
+            ) || null,
+        [activeBankTransactions, registerForm.bankTransactionId]
+    );
+
     const selectedErpMovements = useMemo(
         () =>
             erpMovementsForAccount.filter((movimiento) =>
@@ -448,9 +487,37 @@ const ConciliacionBancaria = () => {
         );
     }, [activeReconciliation?.accountId, reconciliaciones]);
 
+    const selectableCounterpartAccounts = useMemo(() => {
+        const availableAccounts = accounts
+            .filter((account) => !account.isGroup && account.id !== selectedAccount?.id)
+            .sort((left, right) =>
+                String(left.code || '').localeCompare(String(right.code || ''))
+            );
+
+        switch (registerForm.category) {
+            case 'gasto':
+                return availableAccounts.filter((account) =>
+                    ['GASTO', 'COSTO'].includes(String(account.type || '').toUpperCase())
+                );
+            case 'ingreso':
+                return availableAccounts.filter(
+                    (account) => String(account.type || '').toUpperCase() === 'INGRESO'
+                );
+            case 'transferencia':
+                return availableAccounts.filter((account) => isTransferAccount(account));
+            default:
+                return availableAccounts;
+        }
+    }, [accounts, registerForm.category, selectedAccount?.id]);
+
     const resetSelections = () => {
         setSelectedBankIds([]);
         setSelectedMovimientoIds([]);
+    };
+
+    const closeRegisterModal = () => {
+        setShowRegisterModal(false);
+        setRegisterForm(createRegisterForm(null, selectedAccount?.currency || 'NIO'));
     };
 
     const handleAccountChange = (accountId) => {
@@ -470,6 +537,8 @@ const ConciliacionBancaria = () => {
                 : buildBlankReconciliation(account)
         );
         resetSelections();
+        setShowRegisterModal(false);
+        setRegisterForm(createRegisterForm(null, account.currency || 'NIO'));
         setSuccess('');
         setError('');
     };
@@ -493,6 +562,40 @@ const ConciliacionBancaria = () => {
         }
 
         const now = Timestamp.now();
+        const reconciliationMatchGroups = reconciliation.matchGroups || [];
+        const reconciliationBankTransactions = reconciliation.bankTransactions || [];
+        const reconciliationMatchedBankIds = new Set(
+            reconciliationMatchGroups.flatMap((group) => group.bankTransactionIds || [])
+        );
+        const reconciliationMatchedMovimientoIds = new Set(
+            reconciliationMatchGroups.flatMap((group) => group.movimientoIds || [])
+        );
+        const expectedNetChangeValue =
+            normalizeNumber(reconciliation.saldoFinal) -
+            normalizeNumber(reconciliation.saldoInicial);
+        const importedNetChangeValue = reconciliationBankTransactions.reduce(
+            (sum, transaction) => sum + normalizeNumber(transaction.signedAmount),
+            0
+        );
+        const matchedErpNetChangeValue = erpMovementsForAccount
+            .filter((movimiento) =>
+                reconciliationMatchedMovimientoIds.has(movimiento.id)
+            )
+            .reduce(
+                (sum, movimiento) => sum + normalizeNumber(movimiento.signedAmount),
+                0
+            );
+        const statementDifferenceValue =
+            expectedNetChangeValue - importedNetChangeValue;
+        const bookDifferenceValue =
+            expectedNetChangeValue - matchedErpNetChangeValue;
+        const totalPendientesBancoValue = reconciliationBankTransactions.filter(
+            (transaction) => !reconciliationMatchedBankIds.has(transaction.id)
+        ).length;
+        const totalPendientesERPValue = erpMovementsForAccount.filter(
+            (movimiento) => !reconciliationMatchedMovimientoIds.has(movimiento.id)
+        ).length;
+
         const payload = {
             accountId: reconciliation.accountId,
             accountCode: reconciliation.accountCode,
@@ -506,15 +609,15 @@ const ConciliacionBancaria = () => {
             csvFileName: reconciliation.csvFileName || '',
             notes: reconciliation.notes || '',
             estado: targetStatus,
-            bankTransactions: reconciliation.bankTransactions || [],
-            matchGroups: reconciliation.matchGroups || [],
-            importedNetChange: normalizeNumber(importedNetChange),
-            matchedErpNetChange: normalizeNumber(matchedErpNetChange),
-            expectedNetChange: normalizeNumber(expectedNetChange),
-            statementDifference: normalizeNumber(statementDifference),
-            bookDifference: normalizeNumber(bookDifference),
-            totalPendientesBanco: pendingBankTransactions.length,
-            totalPendientesERP: pendingErpMovements.length,
+            bankTransactions: reconciliationBankTransactions,
+            matchGroups: reconciliationMatchGroups,
+            importedNetChange: normalizeNumber(importedNetChangeValue),
+            matchedErpNetChange: normalizeNumber(matchedErpNetChangeValue),
+            expectedNetChange: normalizeNumber(expectedNetChangeValue),
+            statementDifference: normalizeNumber(statementDifferenceValue),
+            bookDifference: normalizeNumber(bookDifferenceValue),
+            totalPendientesBanco: totalPendientesBancoValue,
+            totalPendientesERP: totalPendientesERPValue,
             updatedAt: now,
             updatedBy: user?.uid || '',
             updatedByEmail: user?.email || ''
@@ -614,6 +717,28 @@ const ConciliacionBancaria = () => {
         resetSelections();
         setSuccess('Se inició una nueva conciliación para la cuenta seleccionada.');
         setError('');
+        closeRegisterModal();
+    };
+
+    const openRegisterMissingModal = () => {
+        if (selectedBankIds.length !== 1) {
+            setError('Seleccione una sola transacción del banco para registrarla en el ERP.');
+            return;
+        }
+
+        const transaction = activeBankTransactions.find(
+            (item) => item.id === selectedBankIds[0]
+        );
+
+        if (!transaction) {
+            setError('No se encontró la transacción bancaria seleccionada.');
+            return;
+        }
+
+        setRegisterForm(createRegisterForm(transaction, selectedAccount?.currency || 'NIO'));
+        setShowRegisterModal(true);
+        setError('');
+        setSuccess('');
     };
 
     const toggleBankSelection = (transactionId) => {
@@ -832,12 +957,182 @@ const ConciliacionBancaria = () => {
             bankAccounts.find((candidate) => candidate.id === item.accountId) || null;
         setActiveReconciliation(hydrateReconciliation(item, account));
         resetSelections();
+        setShowRegisterModal(false);
+        setRegisterForm(createRegisterForm(null, account?.currency || 'NIO'));
         setError('');
         setSuccess(
             item.estado === 'completada'
                 ? 'Conciliación histórica cargada en modo consulta.'
                 : 'Conciliación cargada para continuar trabajando.'
         );
+    };
+
+    const handleRegisterMissingEntry = async (event) => {
+        event.preventDefault();
+
+        if (!selectedAccount || !selectedBankTransactionForRegistration || !activeReconciliation) {
+            setError('No se encontró la transacción bancaria para registrar.');
+            return;
+        }
+
+        const counterpartAccount = selectableCounterpartAccounts.find(
+            (account) => account.id === registerForm.counterpartAccountId
+        );
+
+        if (!counterpartAccount) {
+            setError('Seleccione la cuenta contrapartida del movimiento.');
+            return;
+        }
+
+        const signedAmount = normalizeNumber(
+            selectedBankTransactionForRegistration.signedAmount
+        );
+
+        if (registerForm.category === 'gasto' && signedAmount > 0) {
+            setError('Una transacción de gasto debe ser una salida del banco.');
+            return;
+        }
+
+        if (registerForm.category === 'ingreso' && signedAmount < 0) {
+            setError('Una transacción de ingreso debe ser una entrada al banco.');
+            return;
+        }
+
+        setRegisteringEntry(true);
+        setError('');
+        setSuccess('');
+
+        try {
+            const amountAbs = Math.abs(signedAmount);
+            const exchangeRate =
+                Number(registerForm.tipoCambio || 0) > 0
+                    ? Number(registerForm.tipoCambio)
+                    : 36.5;
+            const amountNio =
+                String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD'
+                    ? amountAbs * exchangeRate
+                    : amountAbs;
+            const amountUsd =
+                String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD'
+                    ? amountAbs
+                    : 0;
+
+            const bankTipo = signedAmount >= 0 ? 'DEBITO' : 'CREDITO';
+            const counterpartTipo = bankTipo === 'DEBITO' ? 'CREDITO' : 'DEBITO';
+
+            const documentRef = doc(collection(db, 'registrosConciliacionBancaria'));
+            const documentType =
+                registerForm.category === 'ingreso'
+                    ? DOCUMENT_TYPES.INGRESO
+                    : registerForm.category === 'gasto'
+                      ? DOCUMENT_TYPES.GASTO
+                      : DOCUMENT_TYPES.AJUSTE;
+
+            await setDoc(documentRef, {
+                fecha: registerForm.fecha,
+                descripcion: registerForm.descripcion || selectedBankTransactionForRegistration.descripcion || 'Movimiento conciliado',
+                referencia: registerForm.referencia || selectedBankTransactionForRegistration.referencia || '',
+                accountId: selectedAccount.id,
+                accountCode: selectedAccount.code,
+                accountName: selectedAccount.name,
+                bankTransactionId: selectedBankTransactionForRegistration.id,
+                reconciliationId: activeReconciliation.id || null,
+                category: registerForm.category,
+                counterpartAccountId: counterpartAccount.id,
+                counterpartAccountCode: counterpartAccount.code,
+                counterpartAccountName: counterpartAccount.name,
+                monto: amountNio,
+                montoUSD: amountUsd,
+                currency: selectedAccount.currency || 'NIO',
+                tipoCambio: exchangeRate,
+                notas: registerForm.notas || '',
+                createdAt: Timestamp.now(),
+                createdBy: user?.uid || '',
+                createdByEmail: user?.email || ''
+            });
+
+            const entry = await registerAccountingEntry({
+                fecha: registerForm.fecha,
+                descripcion:
+                    registerForm.descripcion ||
+                    selectedBankTransactionForRegistration.descripcion ||
+                    `Movimiento conciliado ${registerForm.category}`,
+                referencia:
+                    registerForm.referencia ||
+                    selectedBankTransactionForRegistration.referencia ||
+                    `CONC-${documentRef.id.slice(0, 8).toUpperCase()}`,
+                documentoId: documentRef.id,
+                documentoTipo: documentType,
+                moduloOrigen: 'conciliacionBancaria',
+                userId: user?.uid,
+                userEmail: user?.email,
+                movimientos: [
+                    {
+                        cuentaId: selectedAccount.id,
+                        cuentaCode: selectedAccount.code,
+                        cuentaName: selectedAccount.name,
+                        tipo: bankTipo,
+                        monto: amountNio,
+                        montoUSD: amountUsd,
+                        descripcion: selectedBankTransactionForRegistration.descripcion || registerForm.descripcion || 'Movimiento bancario'
+                    },
+                    {
+                        cuentaId: counterpartAccount.id,
+                        cuentaCode: counterpartAccount.code,
+                        cuentaName: counterpartAccount.name,
+                        tipo: counterpartTipo,
+                        monto: amountNio,
+                        montoUSD: amountUsd,
+                        descripcion: registerForm.descripcion || selectedBankTransactionForRegistration.descripcion || 'Contrapartida conciliación bancaria'
+                    }
+                ],
+                metadata: {
+                    reconciliationId: activeReconciliation.id || null,
+                    bankTransactionId: selectedBankTransactionForRegistration.id,
+                    category: registerForm.category,
+                    bankAccountId: selectedAccount.id,
+                    bankAccountCode: selectedAccount.code,
+                    tipoCambio: exchangeRate
+                }
+            });
+
+            const bankMovimiento =
+                entry.movimientos.find(
+                    (movimiento) =>
+                        movimiento.cuentaId === selectedAccount.id ||
+                        normalizeCode(movimiento.cuentaCode) === normalizeCode(selectedAccount.code)
+                ) || entry.movimientos[0];
+
+            const nextState = {
+                ...activeReconciliation,
+                matchGroups: [
+                    ...activeMatchGroups,
+                    {
+                        id: createMatchId(),
+                        bankTransactionIds: [selectedBankTransactionForRegistration.id],
+                        movimientoIds: [bankMovimiento.id],
+                        totalBank: signedAmount,
+                        totalERP: signedAmount,
+                        createdAt: new Date().toISOString(),
+                        autoGenerated: true
+                    }
+                ]
+            };
+
+            setActiveReconciliation(nextState);
+            resetSelections();
+            closeRegisterModal();
+            setSuccess('Movimiento registrado en el ERP y conciliado inmediatamente.');
+            await persistReconciliation(nextState, 'borrador');
+        } catch (registerError) {
+            console.error('Error registrando movimiento faltante:', registerError);
+            setError(
+                registerError.message ||
+                    'No se pudo registrar el movimiento faltante desde la conciliación.'
+            );
+        } finally {
+            setRegisteringEntry(false);
+        }
     };
 
     const loadingScreen =
@@ -866,12 +1161,10 @@ const ConciliacionBancaria = () => {
                         </div>
                         <div>
                             <h1 className="text-3xl font-black tracking-tight">
-                                Conciliación tipo QuickBooks, aterrizada a tu ERP
+                                Conciliación Bancaria
                             </h1>
                             <p className="mt-2 max-w-3xl text-sm text-slate-300 md:text-base">
-                                Sube el CSV del banco, compara contra tus movimientos
-                                contables reales, guarda el avance y retoma después sin
-                                perder nada.
+                                Sube CSV Banco.
                             </p>
                         </div>
                     </div>
@@ -893,7 +1186,7 @@ const ConciliacionBancaria = () => {
                             className="inline-flex items-center gap-2 rounded-2xl bg-blue-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             <Upload className="h-4 w-4" />
-                            Subir CSV bancario
+                            Subir CSV Banco
                         </button>
                         <button
                             type="button"
@@ -1250,6 +1543,17 @@ const ConciliacionBancaria = () => {
                                 </button>
                                 <button
                                     type="button"
+                                    onClick={openRegisterMissingModal}
+                                    disabled={
+                                        activeReconciliation?.estado === 'completada' ||
+                                        selectedBankIds.length !== 1
+                                    }
+                                    className="rounded-2xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    Registrar en ERP
+                                </button>
+                                <button
+                                    type="button"
                                     onClick={handleMatchSelection}
                                     disabled={
                                         activeReconciliation?.estado === 'completada' ||
@@ -1545,6 +1849,233 @@ const ConciliacionBancaria = () => {
                 </section>
             </div>
 
+            {showRegisterModal && selectedBankTransactionForRegistration && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
+                    <div className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-[28px] bg-white shadow-2xl">
+                        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-5">
+                            <div>
+                                <h2 className="text-2xl font-black text-slate-900">
+                                    Registrar movimiento faltante
+                                </h2>
+                                <p className="mt-1 text-sm text-slate-500">
+                                    Crea el movimiento desde la línea bancaria y déjalo conciliado al guardar.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeRegisterModal}
+                                className="rounded-full p-2 text-slate-500 transition hover:bg-slate-100"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleRegisterMissingEntry} className="space-y-6 p-6">
+                            <div className="rounded-[22px] border border-blue-100 bg-blue-50 p-4">
+                                <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">
+                                    Línea del banco
+                                </p>
+                                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                                    <div>
+                                        <p className="text-sm font-semibold text-slate-900">
+                                            {selectedBankTransactionForRegistration.descripcion}
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            {selectedBankTransactionForRegistration.fecha} · {selectedBankTransactionForRegistration.referencia || 'Sin referencia'}
+                                        </p>
+                                    </div>
+                                    <div className="text-left sm:text-right">
+                                        <p className={`text-xl font-black ${
+                                            normalizeNumber(selectedBankTransactionForRegistration.signedAmount) >= 0
+                                                ? 'text-emerald-600'
+                                                : 'text-red-600'
+                                        }`}>
+                                            {formatSignedAmount(
+                                                selectedBankTransactionForRegistration.signedAmount,
+                                                selectedAccount?.currency || 'NIO'
+                                            )}
+                                        </p>
+                                        <p className="text-xs text-slate-500">
+                                            Cuenta banco: {selectedAccount?.code} - {selectedAccount?.name}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                        Tipo de movimiento
+                                    </label>
+                                    <select
+                                        value={registerForm.category}
+                                        onChange={(event) =>
+                                            setRegisterForm((previous) => ({
+                                                ...previous,
+                                                category: event.target.value,
+                                                counterpartAccountId: ''
+                                            }))
+                                        }
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                    >
+                                        <option value="gasto">Gasto / egreso</option>
+                                        <option value="ingreso">Ingreso</option>
+                                        <option value="transferencia">Transferencia</option>
+                                        <option value="ajuste">Ajuste</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                        Fecha
+                                    </label>
+                                    <input
+                                        type="date"
+                                        value={registerForm.fecha}
+                                        onChange={(event) =>
+                                            setRegisterForm((previous) => ({
+                                                ...previous,
+                                                fecha: event.target.value
+                                            }))
+                                        }
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                        Cuenta contrapartida
+                                    </label>
+                                    <select
+                                        value={registerForm.counterpartAccountId}
+                                        onChange={(event) =>
+                                            setRegisterForm((previous) => ({
+                                                ...previous,
+                                                counterpartAccountId: event.target.value
+                                            }))
+                                        }
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                        required
+                                    >
+                                        <option value="">Seleccione una cuenta...</option>
+                                        {selectableCounterpartAccounts.map((account) => (
+                                            <option key={account.id} value={account.id}>
+                                                {account.code} - {account.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                {String(selectedAccount?.currency || 'NIO').toUpperCase() === 'USD' && (
+                                    <div>
+                                        <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                            Tipo de cambio
+                                        </label>
+                                        <input
+                                            type="number"
+                                            step="0.0001"
+                                            min="0.0001"
+                                            value={registerForm.tipoCambio}
+                                            onChange={(event) =>
+                                                setRegisterForm((previous) => ({
+                                                    ...previous,
+                                                    tipoCambio: event.target.value
+                                                }))
+                                            }
+                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                    Descripción
+                                </label>
+                                <input
+                                    type="text"
+                                    value={registerForm.descripcion}
+                                    onChange={(event) =>
+                                        setRegisterForm((previous) => ({
+                                            ...previous,
+                                            descripcion: event.target.value
+                                        }))
+                                    }
+                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                    placeholder="Descripción contable del movimiento"
+                                />
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                        Referencia
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={registerForm.referencia}
+                                        onChange={(event) =>
+                                            setRegisterForm((previous) => ({
+                                                ...previous,
+                                                referencia: event.target.value
+                                            }))
+                                        }
+                                        className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                        placeholder="Referencia o documento"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                        Monto banco
+                                    </label>
+                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900">
+                                        {formatSignedAmount(
+                                            selectedBankTransactionForRegistration.signedAmount,
+                                            selectedAccount?.currency || 'NIO'
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="mb-1 block text-sm font-semibold text-slate-600">
+                                    Notas
+                                </label>
+                                <textarea
+                                    rows={3}
+                                    value={registerForm.notas}
+                                    onChange={(event) =>
+                                        setRegisterForm((previous) => ({
+                                            ...previous,
+                                            notas: event.target.value
+                                        }))
+                                    }
+                                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-300 focus:bg-white"
+                                    placeholder="Comentario opcional"
+                                />
+                            </div>
+
+                            <div className="flex flex-col gap-3 border-t border-slate-200 pt-4 sm:flex-row sm:justify-end">
+                                <button
+                                    type="button"
+                                    onClick={closeRegisterModal}
+                                    className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={registeringEntry}
+                                    className="rounded-2xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    {registeringEntry ? 'Registrando...' : 'Registrar y conciliar'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
             {csvState.open && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
                     <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-[30px] bg-white shadow-2xl">
@@ -1699,7 +2230,7 @@ const ConciliacionBancaria = () => {
 
                         <div className="sticky bottom-0 flex flex-col gap-3 border-t border-slate-200 bg-white px-6 py-5 sm:flex-row sm:items-center sm:justify-between">
                             <p className="text-sm text-slate-500">
-                                Inspirado en el flujo de QuickBooks: importar, mapear, conciliar y guardar el avance.
+                                Importa, asigna y concilia movimientos bancarios.
                             </p>
                             <div className="flex gap-3">
                                 <button
