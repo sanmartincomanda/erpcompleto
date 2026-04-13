@@ -183,7 +183,9 @@ const createRegisterForm = (transaction = null, currency = 'NIO') => ({
     referencia: transaction?.referencia || '',
     counterpartAccountId: '',
     notas: '',
-    tipoCambio: currency === 'USD' ? '36.50' : '1'
+    tipoCambio: currency === 'USD' ? '36.50' : '1',
+    amount: Math.abs(normalizeNumber(transaction?.signedAmount)),
+    mode: transaction ? 'bank' : 'manual'
 });
 
 const ConciliacionBancaria = () => {
@@ -208,6 +210,7 @@ const ConciliacionBancaria = () => {
     const [showRegisterModal, setShowRegisterModal] = useState(false);
     const [registeringEntry, setRegisteringEntry] = useState(false);
     const [registerForm, setRegisterForm] = useState(createRegisterForm());
+    const [resolvingDifference, setResolvingDifference] = useState(false);
 
     const bankAccounts = useMemo(() => {
         const accounts = [...getBancoAccounts('NIO'), ...getBancoAccounts('USD')];
@@ -440,11 +443,42 @@ const ConciliacionBancaria = () => {
     );
 
     const selectedBankTransactionForRegistration = useMemo(
-        () =>
-            activeBankTransactions.find(
-                (transaction) => transaction.id === registerForm.bankTransactionId
-            ) || null,
-        [activeBankTransactions, registerForm.bankTransactionId]
+        () => {
+            const selectedTransaction =
+                activeBankTransactions.find(
+                    (transaction) => transaction.id === registerForm.bankTransactionId
+                ) || null;
+
+            if (selectedTransaction) return selectedTransaction;
+
+            if (registerForm.mode === 'difference') {
+                return {
+                    id: 'difference-adjustment',
+                    fecha: registerForm.fecha || formatDateInput(),
+                    descripcion:
+                        registerForm.descripcion ||
+                        `Complemento para ${selectedAccount?.name || 'cuenta bancaria'}`,
+                    referencia: registerForm.referencia || 'Complemento conciliación',
+                    signedAmount:
+                        registerForm.category === 'gasto'
+                            ? -Math.abs(normalizeNumber(registerForm.amount))
+                            : Math.abs(normalizeNumber(registerForm.amount))
+                };
+            }
+
+            return null;
+        },
+        [
+            activeBankTransactions,
+            registerForm.amount,
+            registerForm.bankTransactionId,
+            registerForm.category,
+            registerForm.descripcion,
+            registerForm.fecha,
+            registerForm.mode,
+            registerForm.referencia,
+            selectedAccount?.name
+        ]
     );
 
     const selectedErpMovements = useMemo(
@@ -497,7 +531,6 @@ const ConciliacionBancaria = () => {
         (movimiento) =>
             !isMovimientoConciliado(movimiento, matchedMovimientoIds)
     );
-
     const canComplete =
         !!selectedAccount &&
         activeBankTransactions.length > 0 &&
@@ -507,6 +540,22 @@ const ConciliacionBancaria = () => {
     const isLockedReconciliation = ['completada', 'cerrada'].includes(
         activeReconciliation?.estado
     );
+    const differenceThreshold =
+        String(selectedAccount?.currency || 'NIO').toUpperCase() === 'USD'
+            ? 3 / 36.5
+            : 3;
+    const canResolveBookDifference =
+        !!selectedAccount &&
+        Math.abs(statementDifference) <= 0.01 &&
+        Math.abs(bookDifference) > 0.01;
+    const canSendTariffDifference =
+        canResolveBookDifference &&
+        Math.abs(bookDifference) <= differenceThreshold &&
+        !isLockedReconciliation;
+    const canRegisterComplement =
+        canResolveBookDifference &&
+        Math.abs(bookDifference) > differenceThreshold &&
+        !isLockedReconciliation;
 
     const accountSessions = useMemo(() => {
         if (!activeReconciliation?.accountId) return reconciliaciones;
@@ -514,6 +563,15 @@ const ConciliacionBancaria = () => {
             (item) => item.accountId === activeReconciliation.accountId
         );
     }, [activeReconciliation?.accountId, reconciliaciones]);
+
+    const findAccountByCodes = (...codes) => {
+        const normalizedCodes = codes.map(normalizeCode);
+        return accounts.find(
+            (account) =>
+                !account.isGroup &&
+                normalizedCodes.includes(normalizeCode(account.code))
+        );
+    };
 
     const selectableCounterpartAccounts = useMemo(() => {
         const availableAccounts = accounts
@@ -1035,10 +1093,192 @@ const ConciliacionBancaria = () => {
         );
     };
 
+    const openDifferenceComplementModal = () => {
+        if (!selectedAccount || !activeReconciliation) return;
+        if (!canRegisterComplement) {
+            setError(
+                'El complemento solo aplica cuando el CSV ya está cuadrado y la diferencia en libros supera C$ 3.00.'
+            );
+            return;
+        }
+
+        const signedAmount = normalizeNumber(bookDifference);
+        setRegisterForm({
+            ...createRegisterForm(null, selectedAccount?.currency || 'NIO'),
+            mode: 'difference',
+            category: signedAmount < 0 ? 'gasto' : 'ingreso',
+            fecha: activeReconciliation.fechaFin || formatDateInput(),
+            descripcion: `Complemento conciliación bancaria ${selectedAccount.name}`,
+            referencia: `CONC-COMP-${String(activeReconciliation.id || Date.now())
+                .slice(-6)
+                .toUpperCase()}`,
+            notas: 'Registro complemento generado desde conciliación bancaria.',
+            amount: Math.abs(signedAmount)
+        });
+        setShowRegisterModal(true);
+        setError('');
+        setSuccess('');
+    };
+
+    const createReconciliationEntry = async ({
+        signedAmount,
+        category,
+        fecha,
+        descripcion,
+        referencia,
+        counterpartAccount,
+        notas = '',
+        exchangeRate,
+        bankTransaction = null,
+        sourceMode = 'bank',
+        successMessage = 'Movimiento registrado en el ERP y conciliado inmediatamente.'
+    }) => {
+        const absoluteAmount = Math.abs(normalizeNumber(signedAmount));
+        if (absoluteAmount <= 0) {
+            throw new Error('El monto del movimiento debe ser mayor a cero.');
+        }
+
+        const isUsdAccount =
+            String(selectedAccount?.currency || 'NIO').toUpperCase() === 'USD';
+        const resolvedExchangeRate = isUsdAccount
+            ? Number(exchangeRate || 0) > 0
+                ? Number(exchangeRate)
+                : 36.5
+            : 1;
+        const amountNio = isUsdAccount
+            ? absoluteAmount * resolvedExchangeRate
+            : absoluteAmount;
+        const amountUsd = isUsdAccount ? absoluteAmount : 0;
+        const bankTipo = signedAmount >= 0 ? 'DEBITO' : 'CREDITO';
+        const counterpartTipo = bankTipo === 'DEBITO' ? 'CREDITO' : 'DEBITO';
+        const documentRef = doc(collection(db, 'registrosConciliacionBancaria'));
+        const documentType =
+            category === 'ingreso'
+                ? DOCUMENT_TYPES.INGRESO
+                : category === 'gasto'
+                  ? DOCUMENT_TYPES.GASTO
+                  : DOCUMENT_TYPES.AJUSTE;
+
+        await setDoc(documentRef, {
+            fecha,
+            descripcion,
+            referencia,
+            accountId: selectedAccount.id,
+            accountCode: selectedAccount.code,
+            accountName: selectedAccount.name,
+            bankTransactionId: bankTransaction?.id || null,
+            reconciliationId: activeReconciliation.id || null,
+            category,
+            counterpartAccountId: counterpartAccount.id,
+            counterpartAccountCode: counterpartAccount.code,
+            counterpartAccountName: counterpartAccount.name,
+            monto: amountNio,
+            montoUSD: amountUsd,
+            currency: selectedAccount.currency || 'NIO',
+            tipoCambio: resolvedExchangeRate,
+            notas,
+            sourceMode,
+            createdAt: Timestamp.now(),
+            createdBy: user?.uid || '',
+            createdByEmail: user?.email || ''
+        });
+
+        const entry = await registerAccountingEntry({
+            fecha,
+            descripcion,
+            referencia,
+            documentoId: documentRef.id,
+            documentoTipo: documentType,
+            moduloOrigen: 'conciliacionBancaria',
+            userId: user?.uid,
+            userEmail: user?.email,
+            movimientos: [
+                {
+                    cuentaId: selectedAccount.id,
+                    cuentaCode: selectedAccount.code,
+                    cuentaName: selectedAccount.name,
+                    tipo: bankTipo,
+                    monto: amountNio,
+                    montoUSD: amountUsd,
+                    descripcion
+                },
+                {
+                    cuentaId: counterpartAccount.id,
+                    cuentaCode: counterpartAccount.code,
+                    cuentaName: counterpartAccount.name,
+                    tipo: counterpartTipo,
+                    monto: amountNio,
+                    montoUSD: amountUsd,
+                    descripcion:
+                        notas || descripcion || 'Contrapartida conciliación bancaria'
+                }
+            ],
+            metadata: {
+                reconciliationId: activeReconciliation.id || null,
+                bankTransactionId: bankTransaction?.id || null,
+                category,
+                bankAccountId: selectedAccount.id,
+                bankAccountCode: selectedAccount.code,
+                tipoCambio: resolvedExchangeRate,
+                sourceMode
+            }
+        });
+
+        const bankMovimiento =
+            entry.movimientos.find(
+                (movimiento) =>
+                    movimiento.cuentaId === selectedAccount.id ||
+                    normalizeCode(movimiento.cuentaCode) ===
+                        normalizeCode(selectedAccount.code)
+            ) || entry.movimientos[0];
+
+        await updateDoc(doc(db, 'movimientosContables', bankMovimiento.id), {
+            conciliationStatus: 'conciliado',
+            estadoConciliacion: 'conciliado',
+            conciliacionId: activeReconciliation.id || documentRef.id,
+            bankTransactionId: bankTransaction?.id || null,
+            updatedAt: Timestamp.now()
+        });
+
+        await updateDoc(documentRef, {
+            asientoId: entry.asientoId || '',
+            movimientoBancoId: bankMovimiento.id,
+            conciliationStatus: 'conciliado',
+            estadoConciliacion: 'conciliado',
+            updatedAt: Timestamp.now()
+        });
+
+        if (bankTransaction?.id) {
+            const nextState = {
+                ...activeReconciliation,
+                matchGroups: [
+                    ...activeMatchGroups,
+                    {
+                        id: createMatchId(),
+                        bankTransactionIds: [bankTransaction.id],
+                        movimientoIds: [bankMovimiento.id],
+                        totalBank: signedAmount,
+                        totalERP: signedAmount,
+                        createdAt: new Date().toISOString(),
+                        autoGenerated: true
+                    }
+                ]
+            };
+
+            setActiveReconciliation(nextState);
+            await persistReconciliation(nextState, 'borrador');
+        }
+
+        resetSelections();
+        closeRegisterModal();
+        setSuccess(successMessage);
+        return bankMovimiento;
+    };
+
     const handleRegisterMissingEntry = async (event) => {
         event.preventDefault();
 
-        if (!selectedAccount || !selectedBankTransactionForRegistration || !activeReconciliation) {
+        if (!selectedAccount || !activeReconciliation) {
             setError('No se encontró la transacción bancaria para registrar.');
             return;
         }
@@ -1052,16 +1292,26 @@ const ConciliacionBancaria = () => {
             return;
         }
 
-        const signedAmount = normalizeNumber(
-            selectedBankTransactionForRegistration.signedAmount
-        );
+        const signedAmount = selectedBankTransactionForRegistration
+            ? normalizeNumber(selectedBankTransactionForRegistration.signedAmount)
+            : registerForm.category === 'gasto'
+              ? -Math.abs(normalizeNumber(registerForm.amount))
+              : Math.abs(normalizeNumber(registerForm.amount));
 
-        if (registerForm.category === 'gasto' && signedAmount > 0) {
+        if (
+            selectedBankTransactionForRegistration &&
+            registerForm.category === 'gasto' &&
+            signedAmount > 0
+        ) {
             setError('Una transacción de gasto debe ser una salida del banco.');
             return;
         }
 
-        if (registerForm.category === 'ingreso' && signedAmount < 0) {
+        if (
+            selectedBankTransactionForRegistration &&
+            registerForm.category === 'ingreso' &&
+            signedAmount < 0
+        ) {
             setError('Una transacción de ingreso debe ser una entrada al banco.');
             return;
         }
@@ -1071,143 +1321,37 @@ const ConciliacionBancaria = () => {
         setSuccess('');
 
         try {
-            const amountAbs = Math.abs(signedAmount);
             const exchangeRate =
+                String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD' &&
                 Number(registerForm.tipoCambio || 0) > 0
                     ? Number(registerForm.tipoCambio)
-                    : 36.5;
-            const amountNio =
-                String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD'
-                    ? amountAbs * exchangeRate
-                    : amountAbs;
-            const amountUsd =
-                String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD'
-                    ? amountAbs
-                    : 0;
+                    : 1;
 
-            const bankTipo = signedAmount >= 0 ? 'DEBITO' : 'CREDITO';
-            const counterpartTipo = bankTipo === 'DEBITO' ? 'CREDITO' : 'DEBITO';
-
-            const documentRef = doc(collection(db, 'registrosConciliacionBancaria'));
-            const documentType =
-                registerForm.category === 'ingreso'
-                    ? DOCUMENT_TYPES.INGRESO
-                    : registerForm.category === 'gasto'
-                      ? DOCUMENT_TYPES.GASTO
-                      : DOCUMENT_TYPES.AJUSTE;
-
-            await setDoc(documentRef, {
-                fecha: registerForm.fecha,
-                descripcion: registerForm.descripcion || selectedBankTransactionForRegistration.descripcion || 'Movimiento conciliado',
-                referencia: registerForm.referencia || selectedBankTransactionForRegistration.referencia || '',
-                accountId: selectedAccount.id,
-                accountCode: selectedAccount.code,
-                accountName: selectedAccount.name,
-                bankTransactionId: selectedBankTransactionForRegistration.id,
-                reconciliationId: activeReconciliation.id || null,
+            await createReconciliationEntry({
+                signedAmount,
                 category: registerForm.category,
-                counterpartAccountId: counterpartAccount.id,
-                counterpartAccountCode: counterpartAccount.code,
-                counterpartAccountName: counterpartAccount.name,
-                monto: amountNio,
-                montoUSD: amountUsd,
-                currency: selectedAccount.currency || 'NIO',
-                tipoCambio: exchangeRate,
-                notas: registerForm.notas || '',
-                createdAt: Timestamp.now(),
-                createdBy: user?.uid || '',
-                createdByEmail: user?.email || ''
-            });
-
-            const entry = await registerAccountingEntry({
                 fecha: registerForm.fecha,
                 descripcion:
                     registerForm.descripcion ||
-                    selectedBankTransactionForRegistration.descripcion ||
+                    selectedBankTransactionForRegistration?.descripcion ||
                     `Movimiento conciliado ${registerForm.category}`,
                 referencia:
                     registerForm.referencia ||
-                    selectedBankTransactionForRegistration.referencia ||
-                    `CONC-${documentRef.id.slice(0, 8).toUpperCase()}`,
-                documentoId: documentRef.id,
-                documentoTipo: documentType,
-                moduloOrigen: 'conciliacionBancaria',
-                userId: user?.uid,
-                userEmail: user?.email,
-                movimientos: [
-                    {
-                        cuentaId: selectedAccount.id,
-                        cuentaCode: selectedAccount.code,
-                        cuentaName: selectedAccount.name,
-                        tipo: bankTipo,
-                        monto: amountNio,
-                        montoUSD: amountUsd,
-                        descripcion: selectedBankTransactionForRegistration.descripcion || registerForm.descripcion || 'Movimiento bancario'
-                    },
-                    {
-                        cuentaId: counterpartAccount.id,
-                        cuentaCode: counterpartAccount.code,
-                        cuentaName: counterpartAccount.name,
-                        tipo: counterpartTipo,
-                        monto: amountNio,
-                        montoUSD: amountUsd,
-                        descripcion: registerForm.descripcion || selectedBankTransactionForRegistration.descripcion || 'Contrapartida conciliación bancaria'
-                    }
-                ],
-                metadata: {
-                    reconciliationId: activeReconciliation.id || null,
-                    bankTransactionId: selectedBankTransactionForRegistration.id,
-                    category: registerForm.category,
-                    bankAccountId: selectedAccount.id,
-                    bankAccountCode: selectedAccount.code,
-                    tipoCambio: exchangeRate
-                }
+                    selectedBankTransactionForRegistration?.referencia ||
+                    `CONC-${Date.now()}`,
+                counterpartAccount,
+                notas: registerForm.notas || '',
+                exchangeRate,
+                bankTransaction:
+                    registerForm.mode === 'difference'
+                        ? null
+                        : selectedBankTransactionForRegistration,
+                sourceMode: registerForm.mode || 'bank',
+                successMessage:
+                    registerForm.mode === 'difference'
+                        ? 'Complemento registrado y conciliado en libros.'
+                        : 'Movimiento registrado en el ERP y conciliado inmediatamente.'
             });
-
-            const bankMovimiento =
-                entry.movimientos.find(
-                    (movimiento) =>
-                        movimiento.cuentaId === selectedAccount.id ||
-                        normalizeCode(movimiento.cuentaCode) === normalizeCode(selectedAccount.code)
-                ) || entry.movimientos[0];
-
-            await updateDoc(doc(db, 'movimientosContables', bankMovimiento.id), {
-                conciliationStatus: 'conciliado',
-                estadoConciliacion: 'conciliado',
-                conciliacionId: activeReconciliation.id || documentRef.id,
-                bankTransactionId: selectedBankTransactionForRegistration.id,
-                updatedAt: Timestamp.now()
-            });
-
-            await updateDoc(documentRef, {
-                asientoId: entry.asientoId || '',
-                movimientoBancoId: bankMovimiento.id,
-                conciliationStatus: 'conciliado',
-                estadoConciliacion: 'conciliado',
-                updatedAt: Timestamp.now()
-            });
-
-            const nextState = {
-                ...activeReconciliation,
-                matchGroups: [
-                    ...activeMatchGroups,
-                    {
-                        id: createMatchId(),
-                        bankTransactionIds: [selectedBankTransactionForRegistration.id],
-                        movimientoIds: [bankMovimiento.id],
-                        totalBank: signedAmount,
-                        totalERP: signedAmount,
-                        createdAt: new Date().toISOString(),
-                        autoGenerated: true
-                    }
-                ]
-            };
-
-            setActiveReconciliation(nextState);
-            resetSelections();
-            closeRegisterModal();
-            setSuccess('Movimiento registrado en el ERP y conciliado inmediatamente.');
-            await persistReconciliation(nextState, 'borrador');
         } catch (registerError) {
             console.error('Error registrando movimiento faltante:', registerError);
             setError(
@@ -1216,6 +1360,67 @@ const ConciliacionBancaria = () => {
             );
         } finally {
             setRegisteringEntry(false);
+        }
+    };
+
+    const handleApplyTariffDifference = async () => {
+        if (!selectedAccount || !activeReconciliation) return;
+        if (!canSendTariffDifference) {
+            setError(
+                'La diferencia tarifaria solo aplica cuando el CSV ya está cuadrado y la diferencia en libros es menor o igual a C$ 3.00.'
+            );
+            return;
+        }
+
+        const signedAmount = normalizeNumber(bookDifference);
+        const counterpartAccount =
+            signedAmount < 0
+                ? findAccountByCodes('610117', '610399', '610199')
+                : findAccountByCodes('410205', '410202');
+
+        if (!counterpartAccount) {
+            setError(
+                'No encontré una cuenta contable disponible para registrar la diferencia tarifaria.'
+            );
+            return;
+        }
+
+        setResolvingDifference(true);
+        setError('');
+        setSuccess('');
+
+        try {
+            await createReconciliationEntry({
+                signedAmount,
+                category: signedAmount < 0 ? 'gasto' : 'ingreso',
+                fecha: activeReconciliation.fechaFin || formatDateInput(),
+                descripcion:
+                    signedAmount < 0
+                        ? 'Diferencia tarifaria bancaria'
+                        : 'Ajuste positivo por diferencia bancaria',
+                referencia: `CONC-TAR-${String(activeReconciliation.id || Date.now())
+                    .slice(-6)
+                    .toUpperCase()}`,
+                counterpartAccount,
+                notas:
+                    'Diferencia tarifaria registrada automáticamente desde conciliación bancaria.',
+                exchangeRate:
+                    String(selectedAccount.currency || 'NIO').toUpperCase() === 'USD'
+                        ? 36.5
+                        : 1,
+                bankTransaction: null,
+                sourceMode: 'tariffDifference',
+                successMessage:
+                    'La diferencia tarifaria se registró y quedó conciliada en libros.'
+            });
+        } catch (differenceError) {
+            console.error('Error aplicando diferencia tarifaria:', differenceError);
+            setError(
+                differenceError.message ||
+                    'No se pudo registrar la diferencia tarifaria.'
+            );
+        } finally {
+            setResolvingDifference(false);
         }
     };
 
@@ -1606,6 +1811,55 @@ const ConciliacionBancaria = () => {
                         </div>
                     </div>
 
+                    {canResolveBookDifference && (
+                        <section className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
+                            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                    <h2 className="text-xl font-black text-slate-900">
+                                        Resolver diferencia en libros
+                                    </h2>
+                                    <p className="mt-1 text-sm text-slate-500">
+                                        Si el CSV ya cuadra y solo falta ajustar libros, puedes resolverlo desde aquí.
+                                    </p>
+                                </div>
+                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+                                    <p className="text-slate-500">Diferencia actual</p>
+                                    <p className="mt-1 text-lg font-black text-slate-900">
+                                        {formatSignedAmount(
+                                            bookDifference,
+                                            selectedAccount?.currency || 'NIO'
+                                        )}
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="mt-4 flex flex-wrap gap-3">
+                                <button
+                                    type="button"
+                                    onClick={handleApplyTariffDifference}
+                                    disabled={!canSendTariffDifference || resolvingDifference}
+                                    className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    {resolvingDifference
+                                        ? 'Enviando diferencia...'
+                                        : 'Enviar diferencia tarifaria'}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={openDifferenceComplementModal}
+                                    disabled={!canRegisterComplement}
+                                    className="rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                    Registrar gasto/ingreso complemento
+                                </button>
+                            </div>
+
+                            <p className="mt-3 text-xs text-slate-500">
+                                Diferencias hasta C$ 3.00 pueden enviarse como tarifa bancaria. Si la diferencia es mayor, usa el complemento desde esta misma conciliación.
+                            </p>
+                        </section>
+                    )}
+
                     <section className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm">
                         <div className="flex flex-col gap-4 border-b border-slate-100 pb-5 lg:flex-row lg:items-center lg:justify-between">
                             <div>
@@ -1947,13 +2201,17 @@ const ConciliacionBancaria = () => {
                 </section>
             </div>
 
-            {showRegisterModal && selectedBankTransactionForRegistration && (
+            {showRegisterModal &&
+                (selectedBankTransactionForRegistration ||
+                    registerForm.mode === 'difference') && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
                     <div className="max-h-[92vh] w-full max-w-2xl overflow-auto rounded-[28px] bg-white shadow-2xl">
                         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-5">
                             <div>
                                 <h2 className="text-2xl font-black text-slate-900">
-                                    Registrar movimiento faltante
+                                    {registerForm.mode === 'difference'
+                                        ? 'Registrar complemento de conciliación'
+                                        : 'Registrar movimiento faltante'}
                                 </h2>
                                 <p className="mt-1 text-sm text-slate-500">
                                     Crea el movimiento desde la línea bancaria y déjalo conciliado al guardar.
@@ -1976,7 +2234,9 @@ const ConciliacionBancaria = () => {
                                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                                     <div>
                                         <p className="text-sm font-semibold text-slate-900">
-                                            {selectedBankTransactionForRegistration.descripcion}
+                                            {registerForm.mode === 'difference'
+                                                ? `Complemento para ${selectedAccount?.name || 'cuenta bancaria'}`
+                                                : selectedBankTransactionForRegistration.descripcion}
                                         </p>
                                         <p className="text-xs text-slate-500">
                                             {selectedBankTransactionForRegistration.fecha} · {selectedBankTransactionForRegistration.referencia || 'Sin referencia'}
@@ -1984,12 +2244,20 @@ const ConciliacionBancaria = () => {
                                     </div>
                                     <div className="text-left sm:text-right">
                                         <p className={`text-xl font-black ${
-                                            normalizeNumber(selectedBankTransactionForRegistration.signedAmount) >= 0
+                                            normalizeNumber(
+                                                selectedBankTransactionForRegistration?.signedAmount ??
+                                                    (registerForm.category === 'gasto'
+                                                        ? -normalizeNumber(registerForm.amount)
+                                                        : normalizeNumber(registerForm.amount))
+                                            ) >= 0
                                                 ? 'text-emerald-600'
                                                 : 'text-red-600'
                                         }`}>
                                             {formatSignedAmount(
-                                                selectedBankTransactionForRegistration.signedAmount,
+                                                selectedBankTransactionForRegistration?.signedAmount ??
+                                                    (registerForm.category === 'gasto'
+                                                        ? -normalizeNumber(registerForm.amount)
+                                                        : normalizeNumber(registerForm.amount)),
                                                 selectedAccount?.currency || 'NIO'
                                             )}
                                         </p>
@@ -2124,14 +2392,32 @@ const ConciliacionBancaria = () => {
                                 </div>
                                 <div>
                                     <label className="mb-1 block text-sm font-semibold text-slate-600">
-                                        Monto banco
+                                        {registerForm.mode === 'difference'
+                                            ? 'Monto a registrar'
+                                            : 'Monto banco'}
                                     </label>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900">
-                                        {formatSignedAmount(
-                                            selectedBankTransactionForRegistration.signedAmount,
-                                            selectedAccount?.currency || 'NIO'
-                                        )}
-                                    </div>
+                                    {registerForm.mode === 'difference' ? (
+                                        <input
+                                            type="number"
+                                            step="0.01"
+                                            min="0.01"
+                                            value={registerForm.amount}
+                                            onChange={(event) =>
+                                                setRegisterForm((previous) => ({
+                                                    ...previous,
+                                                    amount: event.target.value
+                                                }))
+                                            }
+                                            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-300 focus:bg-white"
+                                        />
+                                    ) : (
+                                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900">
+                                            {formatSignedAmount(
+                                                selectedBankTransactionForRegistration.signedAmount,
+                                                selectedAccount?.currency || 'NIO'
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
 
