@@ -40,6 +40,22 @@ import {
 
 const normalizeNumber = (value) => Number(value || 0);
 const normalizeCode = (value) => String(value || '').replace(/\./g, '').trim();
+const normalizeText = (value) => String(value || '').trim().toLowerCase();
+
+const isMovimientoConciliado = (movimiento, matchedMovimientoIds = new Set()) => {
+    if (!movimiento) return false;
+    if (matchedMovimientoIds.has(movimiento.id)) return true;
+
+    const conciliationStatus = normalizeText(
+        movimiento.conciliationStatus ||
+            movimiento.estadoConciliacion ||
+            movimiento.statusConciliacion
+    );
+
+    if (conciliationStatus === 'conciliado') return true;
+
+    return normalizeText(movimiento.moduloOrigen) === 'conciliacionbancaria';
+};
 
 const formatDateInput = (value) => {
     const date = value ? new Date(value) : new Date();
@@ -396,7 +412,10 @@ const ConciliacionBancaria = () => {
         const queryText = searchErp.trim().toLowerCase();
 
         return erpMovementsForAccount.filter((movimiento) => {
-            const isMatched = matchedMovimientoIds.has(movimiento.id);
+            const isMatched = isMovimientoConciliado(
+                movimiento,
+                matchedMovimientoIds
+            );
             if (!showMatched && isMatched) return false;
             if (!queryText) return true;
 
@@ -464,7 +483,9 @@ const ConciliacionBancaria = () => {
     );
 
     const matchedErpNetChange = erpMovementsForAccount
-        .filter((movimiento) => matchedMovimientoIds.has(movimiento.id))
+        .filter((movimiento) =>
+            isMovimientoConciliado(movimiento, matchedMovimientoIds)
+        )
         .reduce((sum, movimiento) => sum + normalizeNumber(movimiento.signedAmount), 0);
 
     const statementDifference = expectedNetChange - importedNetChange;
@@ -473,7 +494,8 @@ const ConciliacionBancaria = () => {
         (transaction) => !matchedBankIds.has(transaction.id)
     );
     const pendingErpMovements = erpMovementsForAccount.filter(
-        (movimiento) => !matchedMovimientoIds.has(movimiento.id)
+        (movimiento) =>
+            !isMovimientoConciliado(movimiento, matchedMovimientoIds)
     );
 
     const canComplete =
@@ -585,7 +607,10 @@ const ConciliacionBancaria = () => {
         );
         const matchedErpNetChangeValue = erpMovementsForAccount
             .filter((movimiento) =>
-                reconciliationMatchedMovimientoIds.has(movimiento.id)
+                isMovimientoConciliado(
+                    movimiento,
+                    reconciliationMatchedMovimientoIds
+                )
             )
             .reduce(
                 (sum, movimiento) => sum + normalizeNumber(movimiento.signedAmount),
@@ -599,7 +624,11 @@ const ConciliacionBancaria = () => {
             (transaction) => !reconciliationMatchedBankIds.has(transaction.id)
         ).length;
         const totalPendientesERPValue = erpMovementsForAccount.filter(
-            (movimiento) => !reconciliationMatchedMovimientoIds.has(movimiento.id)
+            (movimiento) =>
+                !isMovimientoConciliado(
+                    movimiento,
+                    reconciliationMatchedMovimientoIds
+                )
         ).length;
 
         const payload = {
@@ -793,8 +822,11 @@ const ConciliacionBancaria = () => {
     };
 
     const toggleMovimientoSelection = (movimientoId) => {
+        const movimiento = erpMovementsForAccount.find(
+            (item) => item.id === movimientoId
+        );
         if (
-            matchedMovimientoIds.has(movimientoId) ||
+            isMovimientoConciliado(movimiento, matchedMovimientoIds) ||
             isLockedReconciliation
         ) {
             return;
@@ -1138,6 +1170,22 @@ const ConciliacionBancaria = () => {
                         movimiento.cuentaId === selectedAccount.id ||
                         normalizeCode(movimiento.cuentaCode) === normalizeCode(selectedAccount.code)
                 ) || entry.movimientos[0];
+
+            await updateDoc(doc(db, 'movimientosContables', bankMovimiento.id), {
+                conciliationStatus: 'conciliado',
+                estadoConciliacion: 'conciliado',
+                conciliacionId: activeReconciliation.id || documentRef.id,
+                bankTransactionId: selectedBankTransactionForRegistration.id,
+                updatedAt: Timestamp.now()
+            });
+
+            await updateDoc(documentRef, {
+                asientoId: entry.asientoId || '',
+                movimientoBancoId: bankMovimiento.id,
+                conciliationStatus: 'conciliado',
+                estadoConciliacion: 'conciliado',
+                updatedAt: Timestamp.now()
+            });
 
             const nextState = {
                 ...activeReconciliation,
@@ -1783,7 +1831,10 @@ const ConciliacionBancaria = () => {
                                             <tbody className="divide-y divide-slate-100 bg-white">
                                                 {filteredErpMovements.map((movimiento) => {
                                                     const isSelected = selectedMovimientoIds.includes(movimiento.id);
-                                                    const isMatched = matchedMovimientoIds.has(movimiento.id);
+                                                    const isMatched = isMovimientoConciliado(
+                                                        movimiento,
+                                                        matchedMovimientoIds
+                                                    );
 
                                                     return (
                                                         <tr key={movimiento.id} className={isSelected ? 'bg-emerald-50' : ''}>
