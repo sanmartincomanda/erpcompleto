@@ -2,6 +2,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
+import { useAuth } from '../context/AuthContext';
 import { normalizeBranch } from '../utils/branches';
 
 const BranchesContext = createContext();
@@ -15,27 +16,48 @@ export const useBranches = () => {
 };
 
 export const BranchesProvider = ({ children }) => {
+    const { user, loading: authLoading } = useAuth();
     const [branches, setBranches] = useState([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
+        if (authLoading) {
+            setLoading(true);
+            return undefined;
+        }
+
+        if (!user) {
+            setBranches([]);
+            setLoading(false);
+            return undefined;
+        }
+
         const branchesRef = collection(db, 'branches');
-        const unsubscribe = onSnapshot(branchesRef, (snapshot) => {
-            const data = snapshot.docs
-                .map(doc => normalizeBranch({
-                    id: doc.id,
-                    ...doc.data()
-                }))
-                .sort((left, right) => (left.name || '').localeCompare(right.name || ''));
-            setBranches(data);
-            setLoading(false);
-        }, (err) => {
-            console.error('Error cargando sucursales:', err);
-            setLoading(false);
-        });
+        setLoading(true);
+
+        const unsubscribe = onSnapshot(
+            branchesRef,
+            (snapshot) => {
+                const data = snapshot.docs
+                    .map((doc) =>
+                        normalizeBranch({
+                            ...doc.data(),
+                            id: doc.id
+                        })
+                    )
+                    .sort((left, right) => (left.name || '').localeCompare(right.name || ''));
+                setBranches(data);
+                setLoading(false);
+            },
+            (err) => {
+                console.error('Error cargando sucursales:', err);
+                setBranches([]);
+                setLoading(false);
+            }
+        );
 
         return () => unsubscribe();
-    }, []);
+    }, [authLoading, user]);
 
     return (
         <BranchesContext.Provider value={{ branches, loading }}>
