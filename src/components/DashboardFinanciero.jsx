@@ -2,11 +2,11 @@
 import React, { useState, useEffect } from 'react';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../firebase';
-import { 
-    TrendingUp, 
-    TrendingDown, 
-    DollarSign, 
-    Building2, 
+import {
+    TrendingUp,
+    TrendingDown,
+    DollarSign,
+    Building2,
     Wallet,
     CreditCard,
     RefreshCw,
@@ -23,28 +23,24 @@ const DashboardFinanciero = () => {
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        // Cargar estadísticas
         const loadStats = async () => {
             try {
-                // Ventas del mes
                 const ventasRef = collection(db, 'ventasDirectas');
                 const unsubscribeVentas = onSnapshot(ventasRef, (snapshot) => {
                     const total = snapshot.docs.reduce((sum, doc) => sum + (doc.data().monto || 0), 0);
-                    setStats(prev => ({ ...prev, totalVentas: total }));
+                    setStats((prev) => ({ ...prev, totalVentas: total }));
                 });
 
-                // Gastos del mes
                 const gastosRef = collection(db, 'gastosDirectos');
                 const unsubscribeGastos = onSnapshot(gastosRef, (snapshot) => {
                     const total = snapshot.docs.reduce((sum, doc) => sum + (doc.data().monto || 0), 0);
-                    setStats(prev => ({ ...prev, totalGastos: total }));
+                    setStats((prev) => ({ ...prev, totalGastos: total }));
                 });
 
-                // Cuentas por pagar pendientes
-                const facturasRef = collection(db, 'facturasCuentaPagar');
+                const facturasRef = collection(db, 'facturasProveedor');
                 const q = query(facturasRef, where('estado', 'in', ['pendiente', 'parcial']));
                 const unsubscribeFacturas = onSnapshot(q, (snapshot) => {
-                    setStats(prev => ({ ...prev, cuentasPendientes: snapshot.size }));
+                    setStats((prev) => ({ ...prev, cuentasPendientes: snapshot.size }));
                 });
 
                 setLoading(false);
@@ -55,7 +51,7 @@ const DashboardFinanciero = () => {
                     unsubscribeFacturas();
                 };
             } catch (err) {
-                console.error('Error cargando estadísticas:', err);
+                console.error('Error cargando estadisticas:', err);
                 setLoading(false);
             }
         };
@@ -116,7 +112,6 @@ const DashboardFinanciero = () => {
                 Dashboard Financiero
             </h1>
 
-            {/* KPI Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                 {kpiCards.map((card, index) => {
                     const Icon = card.icon;
@@ -137,7 +132,6 @@ const DashboardFinanciero = () => {
                 })}
             </div>
 
-            {/* Secciones adicionales */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="bg-white rounded-lg shadow p-6">
                     <h2 className="text-lg font-semibold mb-4">Resumen de Cuentas</h2>
@@ -167,7 +161,7 @@ const DashboardFinanciero = () => {
                 </div>
 
                 <div className="bg-white rounded-lg shadow p-6">
-                    <h2 className="text-lg font-semibold mb-4">Accesos Rápidos</h2>
+                    <h2 className="text-lg font-semibold mb-4">Accesos Rapidos</h2>
                     <div className="grid grid-cols-2 gap-3">
                         <a href="/dataentry" className="p-4 bg-green-50 rounded-lg hover:bg-green-100 text-center">
                             <TrendingUp className="w-6 h-6 text-green-600 mx-auto mb-2" />
@@ -179,7 +173,7 @@ const DashboardFinanciero = () => {
                         </a>
                         <a href="/depositos-transito" className="p-4 bg-blue-50 rounded-lg hover:bg-blue-100 text-center">
                             <Wallet className="w-6 h-6 text-blue-600 mx-auto mb-2" />
-                            <span className="text-sm font-medium">Depósitos</span>
+                            <span className="text-sm font-medium">Depositos</span>
                         </a>
                         <a href="/cuentas-pagar" className="p-4 bg-orange-50 rounded-lg hover:bg-orange-100 text-center">
                             <Building2 className="w-6 h-6 text-orange-600 mx-auto mb-2" />
