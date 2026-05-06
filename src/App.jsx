@@ -1,6 +1,6 @@
 // src/App.jsx
-// ERP Distribuidoras SR - Aplicación Principal con React Router
-// CORREGIDO: Integración con hooks y servicios unificados
+// ERP Distribuidoras SR - AplicaciÃ³n Principal con React Router
+// CORREGIDO: IntegraciÃ³n con hooks y servicios unificados
 
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
@@ -13,10 +13,10 @@ import Header from './components/Header';
 import PrivateRoute from './components/PrivateRoute';
 import RoleProtectedRoute from './components/RoleProtectedRoute';
 
-// Páginas de Autenticación
+// PÃ¡ginas de AutenticaciÃ³n
 import Login from './components/Login';
 
-// INICIO - Dashboard con accesos rápidos
+// INICIO - Dashboard con accesos rÃ¡pidos
 import Inicio from './components/Inicio';
 
 // Dashboard Financiero (original con KPIs)
@@ -25,23 +25,24 @@ import DashboardFinanciero from './components/DashboardFinanciero';
 // Entrada de Datos
 import DataEntry from './components/DataEntry';
 
-// Módulos Financieros - Contabilidad
+// MÃ³dulos Financieros - Contabilidad
 import ChartOfAccounts from './components/ChartOfAccounts';
 import GastosDiarios from './components/GastosDiarios';
 import ActivosFijos from './components/ActivosFijos';
 import InventarioFisico from './components/InventarioFisico';
 import ConciliacionBancaria from './components/ConciliacionBancaria';
 
-// NUEVOS MÓDULOS: Ventas y Gastos
+// NUEVOS MÃ“DULOS: Ventas y Gastos
 import Ventas from './components/Ventas';
 import Gastos from './components/Gastos';
 
-// Depósitos Bancarios
+// DepÃ³sitos Bancarios
 import DepositosTransito from './components/DepositosTransito';
 import ConfirmacionDeposito from './components/ConfirmacionDeposito';
 
 // Proveedores - Cuentas por Pagar (original con ERP)
 import AccountsPayable from './components/AccountsPayable';
+import AccountsReceivable from './components/AccountsReceivable';
 import ComprasGastos from './components/ComprasGastos';
 import Compras from './components/Compras';
 import Proveedores from './components/Proveedores';
@@ -49,7 +50,7 @@ import Proveedores from './components/Proveedores';
 // Reportes (original)
 import Reports from './components/Reports';
 
-// Configuración
+// ConfiguraciÃ³n
 import Configuracion from './components/Configuracion';
 import ConfiguracionUsuarios from './components/ConfiguracionUsuarios';
 import ConfiguracionSucursales from './components/ConfiguracionSucursales';
@@ -96,17 +97,17 @@ function App() {
             <AccountingProvider>
             <Router>
                 <Routes>
-                    {/* Ruta pública - Login */}
+                    {/* Ruta pÃºblica - Login */}
                     <Route path="/login" element={<Login />} />
                     
                     {/* Ruta por defecto - Redirige a login */}
                     <Route path="/" element={<Navigate to="/login" replace />} />
                     
                     {/* ============================================ */}
-                    {/* RUTAS PROTEGIDAS - Requieren autenticación */}
+                    {/* RUTAS PROTEGIDAS - Requieren autenticaciÃ³n */}
                     {/* ============================================ */}
                     
-                    {/* INICIO - Dashboard con accesos rápidos */}
+                    {/* INICIO - Dashboard con accesos rÃ¡pidos */}
                     <Route 
                         path="/inicio" 
                         element={<PrivatePage element={<Inicio />} />} 
@@ -140,13 +141,13 @@ function App() {
                         element={<PrivatePage element={<DataEntry />} />} 
                     />
                     
-                    {/* NUEVO: Módulo de Ventas */}
+                    {/* NUEVO: MÃ³dulo de Ventas */}
                     <Route 
                         path="/ventas" 
                         element={<PrivatePage element={<Ventas />} />} 
                     />
                     
-                    {/* NUEVO: Módulo de Gastos */}
+                    {/* NUEVO: MÃ³dulo de Gastos */}
                     <Route 
                         path="/gastos" 
                         element={<PrivatePage element={<Gastos />} />} 
@@ -161,6 +162,11 @@ function App() {
                     <Route 
                         path="/activos-fijos" 
                         element={<PrivatePage element={<ActivosFijos />} modulo="activos-fijos" />} 
+                    />
+
+                    <Route 
+                        path="/inventario" 
+                        element={<PrivatePage element={<InventarioFisico />} modulo="inventario-fisico" />} 
                     />
 
                     <Route 
@@ -197,13 +203,13 @@ function App() {
                         element={<PrivatePage element={<GastosDiarios />} modulo="gastos-diarios" />} 
                     />
                     
-                    {/* Depósitos en Tránsito */}
+                    {/* DepÃ³sitos en TrÃ¡nsito */}
                     <Route 
                         path="/depositos-transito" 
                         element={<PrivatePage element={<DepositosTransito />} modulo="depositos-transito" />} 
                     />
                     
-                    {/* Confirmar Depósito */}
+                    {/* Confirmar DepÃ³sito */}
                     <Route 
                         path="/confirmar-deposito" 
                         element={<PrivatePage element={<ConfirmacionDeposito />} modulo="confirmar-deposito" />} 
@@ -214,8 +220,13 @@ function App() {
                         path="/cuentas-pagar" 
                         element={<PrivatePage element={<AccountsPayable />} modulo="cuentas-pagar" />} 
                     />
+
+                    <Route 
+                        path="/cuentas-cobrar" 
+                        element={<PrivatePage element={<AccountsReceivable />} modulo="cuentas-cobrar" />} 
+                    />
                     
-                    {/* Proveedores - Administración */}
+                    {/* Proveedores - AdministraciÃ³n */}
                     <Route 
                         path="/proveedores" 
                         element={<PrivatePage element={<Proveedores />} modulo="proveedores" />} 
@@ -233,7 +244,7 @@ function App() {
                         element={<PrivatePage element={<MovimientosContables />} />} 
                     />
                     
-                    {/* Confirmación Depósito */}
+                    {/* ConfirmaciÃ³n DepÃ³sito */}
                     <Route 
                         path="/confirmacion-deposito" 
                         element={<PrivatePage element={<ConfirmacionDeposito />} />} 
@@ -245,7 +256,7 @@ function App() {
                         element={<PrivatePage element={<ComprasGastos />} />} 
                     />
                     
-                    {/* Compras - Nuevo módulo completo */}
+                    {/* Compras - Nuevo mÃ³dulo completo */}
                     <Route 
                         path="/compras" 
                         element={<PrivatePage element={<Compras />} />} 
@@ -257,19 +268,19 @@ function App() {
                         element={<PrivatePage element={<Reports />} modulo="reportes" />} 
                     />
                     
-                    {/* Configuración General */}
+                    {/* ConfiguraciÃ³n General */}
                     <Route 
                         path="/configuracion" 
                         element={<PrivatePage element={<Configuracion />} modulo="configuracion" />} 
                     />
                     
-                    {/* Configuración de Usuarios */}
+                    {/* ConfiguraciÃ³n de Usuarios */}
                     <Route 
                         path="/configuracion-usuarios" 
                         element={<PrivatePage element={<ConfiguracionUsuarios />} modulo="configuracion-usuarios" />} 
                     />
                     
-                    {/* Configuración de Sucursales */}
+                    {/* ConfiguraciÃ³n de Sucursales */}
                     <Route 
                         path="/configuracion-sucursales" 
                         element={<PrivatePage element={<ConfiguracionSucursales />} modulo="configuracion-sucursales" />} 
@@ -281,7 +292,7 @@ function App() {
                         element={<PrivatePage element={<div className="p-8 text-center text-slate-500">Perfil en desarrollo</div>} />} 
                     />
                     
-                    {/* Ruta 404 - Página no encontrada */}
+                    {/* Ruta 404 - PÃ¡gina no encontrada */}
                     <Route 
                         path="*" 
                         element={
@@ -289,7 +300,7 @@ function App() {
                                 <div className="min-h-screen bg-slate-50 flex items-center justify-center">
                                     <div className="text-center">
                                         <h1 className="text-6xl font-black text-slate-300 mb-4">404</h1>
-                                        <p className="text-xl text-slate-500 mb-6">Página no encontrada</p>
+                                        <p className="text-xl text-slate-500 mb-6">PÃ¡gina no encontrada</p>
                                         <a 
                                             href="/inicio" 
                                             className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-colors"
