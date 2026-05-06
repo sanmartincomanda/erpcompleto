@@ -1,702 +1,435 @@
-// src/components/Compras.jsx - Módulo de Compras (crédito y contado)
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
+import {
+    ArrowUpRight,
+    CreditCard,
+    DollarSign,
+    Receipt,
+    RefreshCw,
+    Search,
+    ShoppingCart,
+    Wallet
+} from 'lucide-react';
 import { db } from '../firebase';
 import {
-    collection,
-    doc,
-    getDocs,
-    onSnapshot,
-    orderBy,
-    query,
-    setDoc,
-    Timestamp,
-    updateDoc,
-    where
-} from 'firebase/firestore';
-import { useAuth } from '../context/AuthContext';
-import { useBranches } from '../hooks/useBranches';
-import { usePlanCuentas } from '../hooks/useUnifiedAccounting';
-import { registerAccountingEntry, DOCUMENT_TYPES } from '../services/unifiedAccountingService';
-import { format } from 'date-fns';
-import { es } from 'date-fns/locale';
-import { 
-    ShoppingCart, Plus, Search, Filter, Calendar, 
-    DollarSign, Store, User, FileText, CreditCard,
-    CheckCircle, AlertCircle, RefreshCw, Trash2, Edit2,
-    Eye, X, TrendingDown, Building2, Tag
-} from 'lucide-react';
+    GRANADA_BRANCH_NAME,
+    formatCurrency,
+    formatShortDate,
+    matchSearch,
+    sourceKind,
+    sourceLabel,
+    sortByDateDesc,
+    toNumber
+} from '../utils/erpMirrorUtils';
+
+const categoryStyles = {
+    mercaderia: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+    gasto: 'bg-rose-50 text-rose-700 ring-1 ring-rose-200'
+};
+
+const sourceStyles = {
+    SICAR: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200',
+    Manual: 'bg-violet-50 text-violet-700 ring-1 ring-violet-200'
+};
+
+const paymentStyles = {
+    pendiente: 'bg-amber-50 text-amber-700 ring-1 ring-amber-200',
+    pagada: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200',
+    anulada: 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'
+};
+
+const summaryStyles = [
+    'bg-amber-50 text-amber-700',
+    'bg-rose-50 text-rose-700',
+    'bg-blue-50 text-blue-700',
+    'bg-emerald-50 text-emerald-700'
+];
+
+const resolveCategory = (documento) => {
+    const code = String(documento?.cuentaCostoCode || documento?.cuentaGastoCode || '');
+    const type = String(documento?.cuentaCostoType || documento?.cuentaGastoType || '').toUpperCase();
+
+    if (
+        documento?.clasificacionContable === 'costo_mercaderia_vendida' ||
+        code.startsWith('51') ||
+        type === 'COSTO' ||
+        documento?.esGasto === false
+    ) {
+        return 'mercaderia';
+    }
+
+    return 'gasto';
+};
+
+const resolvePaymentStatus = (documento) => {
+    if (documento?.cancelado || ['anulado', 'cancelada'].includes(String(documento?.estado || '').toLowerCase())) {
+        return 'anulada';
+    }
+
+    if (documento?.pagada === true || toNumber(documento?.saldoPendiente) <= 0.01) {
+        return 'pagada';
+    }
+
+    if (documento?.esCredito || toNumber(documento?.saldoPendiente) > 0.01) {
+        return 'pendiente';
+    }
+
+    return 'pagada';
+};
+
+const normalizePurchaseDocument = (documento, collectionName) => {
+    const source = sourceLabel(documento);
+    const category = resolveCategory(documento);
+    const paymentStatus = resolvePaymentStatus(documento);
+
+    return {
+        ...documento,
+        mergedId: `${collectionName}:${documento.id}`,
+        collectionName,
+        source,
+        category,
+        paymentStatus,
+        monto: toNumber(documento.monto),
+        saldoPendiente: toNumber(documento.saldoPendiente),
+        montoPagado: toNumber(documento.montoPagado || documento.montoAbonado),
+        moneda: documento.moneda || 'NIO',
+        proveedorNombre: documento.proveedorNombre || documento.proveedor || 'Proveedor',
+        referencia: documento.numeroFactura || documento.factura || documento.documentoId,
+        cuentaCode: documento.cuentaCostoCode || documento.cuentaGastoCode || '',
+        cuentaName: documento.cuentaCostoName || documento.cuentaGastoName || '',
+        fechaPrincipal: documento.fechaEmision || documento.fecha || documento.createdAt || documento.syncedAt
+    };
+};
 
 const Compras = () => {
-    const { user } = useAuth();
-    const { branches } = useBranches();
-    const { accounts, getBancoAccounts, getCajaAccounts, getProveedoresAccount } = usePlanCuentas();
-    
     const [compras, setCompras] = useState([]);
+    const [gastos, setGastos] = useState([]);
+    const [facturasManualCredito, setFacturasManualCredito] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
-    const [filtroTipo, setFiltroTipo] = useState('todas');
-    const [filtroSucursal, setFiltroSucursal] = useState('');
-    const [showModal, setShowModal] = useState(false);
-    const [editingCompra, setEditingCompra] = useState(null);
-    
-    const [formData, setFormData] = useState({
-        fecha: format(new Date(), 'yyyy-MM-dd'),
-        sucursalId: '',
-        sucursalName: '',
-        proveedor: '',
-        descripcion: '',
-        monto: '',
-        moneda: 'NIO',
-        tipoCambio: '36.50',
-        esCredito: false,
-        factura: '',
-        cuentaGastoId: '',
-        cuentaGastoCode: '',
-        cuentaGastoName: '',
-        metodoPago: 'efectivo',
-        bancoId: ''
-    });
-    
-    const [submitting, setSubmitting] = useState(false);
-    const [error, setError] = useState(null);
-    const [success, setSuccess] = useState(null);
+    const [categoryFilter, setCategoryFilter] = useState('todas');
+    const [sourceFilter, setSourceFilter] = useState('todas');
+    const [paymentFilter, setPaymentFilter] = useState('todas');
 
-    // Cuentas de gastos disponibles
-    const cuentasGastos = useMemo(() => {
-        return accounts.filter(a => 
-            (a.type === 'GASTO' || a.type === 'COSTO') && !a.isGroup
-        );
-    }, [accounts]);
-    
-    const cuentasCaja = useMemo(() => {
-        return getCajaAccounts(formData.moneda);
-    }, [getCajaAccounts, formData.moneda]);
-
-    const cuentasBanco = useMemo(() => {
-        return getBancoAccounts(formData.moneda);
-    }, [getBancoAccounts, formData.moneda]);
-
-    // Cargar compras
     useEffect(() => {
         setLoading(true);
-        
-        // Cargar desde colección compras
-        const q = query(
-            collection(db, 'compras'),
-            orderBy('fecha', 'desc')
+        const readyState = { compras: false, gastos: false, facturas: false };
+
+        const markReady = (key) => {
+            readyState[key] = true;
+            if (Object.values(readyState).every(Boolean)) {
+                setLoading(false);
+            }
+        };
+
+        const unsubCompras = onSnapshot(
+            query(collection(db, 'compras'), orderBy('fecha', 'desc')),
+            (snapshot) => {
+                setCompras(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })));
+                markReady('compras');
+            },
+            (error) => {
+                console.error('Error cargando compras:', error);
+                markReady('compras');
+            }
         );
-        
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-            const data = snapshot.docs.map(doc => ({
-                id: doc.id,
-                ...doc.data()
-            }));
-            setCompras(data);
-            setLoading(false);
-        }, (err) => {
-            console.error('Error cargando compras:', err);
-            setLoading(false);
-        });
-        
-        return () => unsubscribe();
+
+        const unsubGastos = onSnapshot(
+            query(collection(db, 'gastosDirectos'), orderBy('fecha', 'desc')),
+            (snapshot) => {
+                setGastos(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })));
+                markReady('gastos');
+            },
+            (error) => {
+                console.error('Error cargando gastos:', error);
+                markReady('gastos');
+            }
+        );
+
+        const unsubFacturas = onSnapshot(
+            query(collection(db, 'facturasProveedor'), orderBy('fechaEmision', 'desc')),
+            (snapshot) => {
+                const manualOnly = snapshot.docs
+                    .map((item) => ({ id: item.id, ...item.data() }))
+                    .filter((item) => sourceKind(item) !== 'sicar');
+
+                setFacturasManualCredito(manualOnly);
+                markReady('facturas');
+            },
+            (error) => {
+                console.error('Error cargando facturas proveedor para compras:', error);
+                markReady('facturas');
+            }
+        );
+
+        return () => {
+            unsubCompras();
+            unsubGastos();
+            unsubFacturas();
+        };
     }, []);
 
-    const comprasFiltradas = useMemo(() => {
-        return compras.filter(c => {
-            const matchesSearch = 
-                c.proveedor?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                c.descripcion?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                c.factura?.includes(searchTerm);
-            
-            const matchesTipo = filtroTipo === 'todas' || 
-                (filtroTipo === 'credito' && c.esCredito) ||
-                (filtroTipo === 'contado' && !c.esCredito);
-            
-            const matchesSucursal = !filtroSucursal || c.sucursalId === filtroSucursal;
-            
-            return matchesSearch && matchesTipo && matchesSucursal;
-        });
-    }, [compras, searchTerm, filtroTipo, filtroSucursal]);
+    const documentos = useMemo(() => {
+        const merged = [
+            ...compras.map((item) => normalizePurchaseDocument(item, 'compras')),
+            ...gastos.map((item) => normalizePurchaseDocument(item, 'gastosDirectos')),
+            ...facturasManualCredito.map((item) => normalizePurchaseDocument(item, 'facturasProveedor'))
+        ];
 
-    const totales = useMemo(() => {
-        const total = comprasFiltradas.reduce((sum, c) => sum + (c.monto || 0), 0);
-        const credito = comprasFiltradas.filter(c => c.esCredito).reduce((sum, c) => sum + (c.monto || 0), 0);
-        const contado = comprasFiltradas.filter(c => !c.esCredito).reduce((sum, c) => sum + (c.monto || 0), 0);
-        return { total, credito, contado };
-    }, [comprasFiltradas]);
+        return sortByDateDesc(merged, 'fechaPrincipal', 'createdAt', 'syncedAt');
+    }, [compras, facturasManualCredito, gastos]);
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setSubmitting(true);
-        setError(null);
-        
-        try {
-            const monto = Number(formData.monto);
-            const montoUSD = formData.moneda === 'USD' ? monto : 0;
-            const montoNIO = formData.moneda === 'NIO' ? monto : monto * Number(formData.tipoCambio);
-            
-            if (!formData.cuentaGastoId) {
-                throw new Error('Debe seleccionar una cuenta de gasto');
-            }
-            
-            // Crear movimientos contables
-            const movimientos = [];
-            
-            if (formData.esCredito) {
-                // Compra a crédito: Débito Gasto, Crédito Proveedores
-                const proveedoresAccount = getProveedoresAccount();
-                if (!proveedoresAccount) {
-                    throw new Error('Cuenta de proveedores (210101) no encontrada');
-                }
-                
-                movimientos.push(
-                    {
-                        cuentaId: formData.cuentaGastoId,
-                        cuentaCode: formData.cuentaGastoCode,
-                        cuentaName: formData.cuentaGastoName,
-                        tipo: 'DEBITO',
-                        monto: montoNIO,
-                        montoUSD: montoUSD,
-                        descripcion: `Compra a crédito: ${formData.descripcion}`
-                    },
-                    {
-                        cuentaId: proveedoresAccount.id,
-                        cuentaCode: proveedoresAccount.code,
-                        cuentaName: proveedoresAccount.name,
-                        tipo: 'CREDITO',
-                        monto: montoNIO,
-                        montoUSD: montoUSD,
-                        descripcion: `Por pagar a ${formData.proveedor}`
-                    }
-                );
-            } else {
-                // Compra al contado: Débito Gasto, Crédito Caja/Banco
-                const cuentaPago = formData.metodoPago === 'efectivo' 
-                    ? cuentasCaja[0]
-                    : cuentasBanco.find(b => b.id === formData.bancoId);
-                    
-                if (!cuentaPago) {
-                    throw new Error('Cuenta de pago no encontrada');
-                }
-                
-                movimientos.push(
-                    {
-                        cuentaId: formData.cuentaGastoId,
-                        cuentaCode: formData.cuentaGastoCode,
-                        cuentaName: formData.cuentaGastoName,
-                        tipo: 'DEBITO',
-                        monto: montoNIO,
-                        montoUSD: montoUSD,
-                        descripcion: `Compra al contado: ${formData.descripcion}`
-                    },
-                    {
-                        cuentaId: cuentaPago.id,
-                        cuentaCode: cuentaPago.code,
-                        cuentaName: cuentaPago.name,
-                        tipo: 'CREDITO',
-                        monto: montoNIO,
-                        montoUSD: montoUSD,
-                        descripcion: `Pago a ${formData.proveedor}`
-                    }
-                );
-            }
-            
-            // Registrar asiento contable
-            const compraRef = doc(collection(db, 'compras'));
-            const referenciaCompra = formData.factura || `COM-${compraRef.id.slice(0, 8).toUpperCase()}`;
-
-            const entry = await registerAccountingEntry({
-                fecha: formData.fecha,
-                descripcion: `Compra: ${formData.descripcion}`,
-                referencia: referenciaCompra,
-                documentoId: compraRef.id,
-                documentoTipo: DOCUMENT_TYPES.GASTO,
-                moduloOrigen: 'compras',
-                userId: user.uid,
-                userEmail: user.email,
-                movimientos,
-                metadata: {
-                    proveedor: formData.proveedor,
-                    factura: formData.factura,
-                    esCredito: formData.esCredito,
-                    moneda: formData.moneda,
-                    sucursalId: formData.sucursalId,
-                    sucursalName: formData.sucursalName
-                }
-            });
-            
-            // Guardar en colección compras
-            await setDoc(compraRef, {
-                documentoId: compraRef.id,
-                fecha: formData.fecha,
-                sucursalId: formData.sucursalId,
-                sucursalName: formData.sucursalName,
-                proveedor: formData.proveedor,
-                descripcion: formData.descripcion,
-                monto: montoNIO,
-                montoUSD: montoUSD,
-                moneda: formData.moneda,
-                esCredito: formData.esCredito,
-                factura: formData.factura,
-                cuentaGastoId: formData.cuentaGastoId,
-                cuentaGastoCode: formData.cuentaGastoCode,
-                cuentaGastoName: formData.cuentaGastoName,
-                metodoPago: formData.esCredito ? null : formData.metodoPago,
-                bancoId: formData.esCredito ? null : formData.bancoId,
-                pagada: !formData.esCredito,
-                montoPagado: formData.esCredito ? 0 : montoNIO,
-                asientoId: entry.asientoId,
-                movimientosContablesIds: entry.movimientos.map(m => m.id),
-                createdAt: Timestamp.now(),
-                createdBy: user.uid,
-                createdByEmail: user.email
-            });
-            
-            setSuccess('Compra registrada exitosamente');
-            resetForm();
-            setShowModal(false);
-            setTimeout(() => setSuccess(null), 3000);
-            
-        } catch (err) {
-            console.error('Error registrando compra:', err);
-            setError(err.message || 'Error al registrar la compra');
-        } finally {
-            setSubmitting(false);
+    const documentosFiltrados = useMemo(() => documentos.filter((documento) => {
+        if (categoryFilter !== 'todas' && documento.category !== categoryFilter) {
+            return false;
         }
-    };
-    
-    const resetForm = () => {
-        setFormData({
-            fecha: format(new Date(), 'yyyy-MM-dd'),
-            sucursalId: '',
-            sucursalName: '',
-            proveedor: '',
-            descripcion: '',
-            monto: '',
-            moneda: 'NIO',
-            tipoCambio: '36.50',
-            esCredito: false,
-            factura: '',
-            cuentaGastoId: '',
-            cuentaGastoCode: '',
-            cuentaGastoName: '',
-            metodoPago: 'efectivo',
-            bancoId: ''
-        });
-    };
 
-    const formatCurrency = (amount, currency = 'NIO') => {
-        const symbol = currency === 'USD' ? '$' : 'C$';
-        return `${symbol} ${Number(amount || 0).toLocaleString('es-NI', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-        })}`;
-    };
+        if (sourceFilter !== 'todas' && sourceKind(documento) !== sourceFilter) {
+            return false;
+        }
 
-    const FormField = ({ label, icon: Icon, children, required }) => (
-        <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">
-                {Icon && <Icon className="w-4 h-4 inline mr-1.5 text-gray-500" />}
-                {label}
-                {required && <span className="text-red-500 ml-1">*</span>}
-            </label>
-            {children}
-        </div>
-    );
+        if (paymentFilter !== 'todas' && documento.paymentStatus !== paymentFilter) {
+            return false;
+        }
+
+        return matchSearch(searchTerm, [
+            documento.proveedorNombre,
+            documento.descripcion,
+            documento.referencia,
+            documento.cuentaCode,
+            documento.cuentaName
+        ]);
+    }), [categoryFilter, documentos, paymentFilter, searchTerm, sourceFilter]);
+
+    const resumen = useMemo(() => documentosFiltrados.reduce((acc, documento) => {
+        acc.documentos += 1;
+        acc.totalGeneral += documento.monto;
+
+        if (documento.category === 'mercaderia') {
+            acc.totalMercaderia += documento.monto;
+        } else {
+            acc.totalGastos += documento.monto;
+        }
+
+        if (documento.paymentStatus === 'pendiente') {
+            acc.totalPendiente += documento.saldoPendiente || documento.monto;
+        }
+
+        return acc;
+    }, {
+        documentos: 0,
+        totalGeneral: 0,
+        totalMercaderia: 0,
+        totalGastos: 0,
+        totalPendiente: 0
+    }), [documentosFiltrados]);
+
+    const summaryCards = [
+        {
+            title: 'Mercaderia / CMV',
+            value: formatCurrency(resumen.totalMercaderia),
+            icon: ShoppingCart
+        },
+        {
+            title: 'Gastos',
+            value: formatCurrency(resumen.totalGastos),
+            icon: DollarSign
+        },
+        {
+            title: 'Pendiente por pagar',
+            value: formatCurrency(resumen.totalPendiente),
+            icon: CreditCard
+        },
+        {
+            title: 'Documentos visibles',
+            value: resumen.documentos,
+            icon: Receipt
+        }
+    ];
 
     return (
-        <div className="p-6 max-w-7xl mx-auto">
-            {/* Header */}
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6">
+        <div className="p-6 max-w-7xl mx-auto space-y-6">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-3">
-                        <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-                            <ShoppingCart className="w-6 h-6 text-purple-600" />
+                    <h1 className="text-3xl font-bold text-slate-900 flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                            <ShoppingCart className="w-7 h-7" />
                         </div>
-                        Compras
+                        Compras y Gastos
                     </h1>
-                    <p className="text-gray-600 mt-2">
-                        Registre todas las compras al contado y a crédito
+                    <p className="mt-2 text-slate-600">
+                        Vista consolidada para {GRANADA_BRANCH_NAME} con mercaderia vendida y gastos en un solo lugar.
                     </p>
                 </div>
-                <button
-                    onClick={() => { resetForm(); setShowModal(true); }}
-                    className="mt-4 md:mt-0 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 flex items-center gap-2"
-                >
-                    <Plus className="w-5 h-5" />
-                    Nueva Compra
-                </button>
-            </div>
 
-            {/* Resumen */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                    <p className="text-sm text-gray-500">Total Compras</p>
-                    <p className="text-2xl font-bold text-gray-900">{formatCurrency(totales.total)}</p>
-                </div>
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                    <p className="text-sm text-gray-500">Compras al Contado</p>
-                    <p className="text-2xl font-bold text-green-600">{formatCurrency(totales.contado)}</p>
-                </div>
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                    <p className="text-sm text-gray-500">Compras a Crédito</p>
-                    <p className="text-2xl font-bold text-amber-600">{formatCurrency(totales.credito)}</p>
+                <div className="flex flex-col sm:flex-row gap-3">
+                    <Link
+                        to="/data-entry"
+                        className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 text-white px-4 py-3 hover:bg-slate-800 transition-colors"
+                    >
+                        Registrar gasto manual
+                        <ArrowUpRight className="w-4 h-4" />
+                    </Link>
+                    <Link
+                        to="/cuentas-pagar"
+                        className="inline-flex items-center gap-2 rounded-2xl border border-slate-300 px-4 py-3 text-slate-700 hover:bg-slate-50 transition-colors"
+                    >
+                        Ir a cuentas por pagar
+                        <Wallet className="w-4 h-4" />
+                    </Link>
                 </div>
             </div>
 
-            {/* Filtros */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
-                <div className="flex flex-wrap gap-4">
-                    <div className="flex-1 min-w-[250px]">
-                        <div className="relative">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                {summaryCards.map((card, index) => {
+                    const Icon = card.icon;
+                    return (
+                        <div key={card.title} className={`rounded-2xl p-4 ${summaryStyles[index]}`}>
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <p className="text-sm font-medium opacity-80">{card.title}</p>
+                                    <p className="mt-2 text-2xl font-bold">{card.value}</p>
+                                </div>
+                                <Icon className="w-8 h-8 opacity-80" />
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="p-5 border-b border-slate-200 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900">Documentos de compras</h2>
+                        <p className="text-sm text-slate-500">
+                            El distintivo separa claramente mercaderia para CMV y gastos operativos.
+                        </p>
+                    </div>
+
+                    <div className="flex flex-col md:flex-row gap-3">
+                        <div className="relative min-w-[260px]">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                             <input
                                 type="text"
-                                placeholder="Buscar por proveedor, descripción, factura..."
                                 value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                                className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
+                                onChange={(event) => setSearchTerm(event.target.value)}
+                                placeholder="Buscar proveedor, referencia o cuenta"
+                                className="w-full rounded-xl border border-slate-300 pl-9 pr-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500"
                             />
                         </div>
+                        <select
+                            value={categoryFilter}
+                            onChange={(event) => setCategoryFilter(event.target.value)}
+                            className="rounded-xl border border-slate-300 px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        >
+                            <option value="todas">Mercaderia y gastos</option>
+                            <option value="mercaderia">Mercaderia / CMV</option>
+                            <option value="gasto">Gastos</option>
+                        </select>
+                        <select
+                            value={sourceFilter}
+                            onChange={(event) => setSourceFilter(event.target.value)}
+                            className="rounded-xl border border-slate-300 px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        >
+                            <option value="todas">Todas las fuentes</option>
+                            <option value="sicar">SICAR</option>
+                            <option value="manual">Manual</option>
+                        </select>
+                        <select
+                            value={paymentFilter}
+                            onChange={(event) => setPaymentFilter(event.target.value)}
+                            className="rounded-xl border border-slate-300 px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                        >
+                            <option value="todas">Todos los pagos</option>
+                            <option value="pagada">Pagadas</option>
+                            <option value="pendiente">Pendientes</option>
+                            <option value="anulada">Anuladas</option>
+                        </select>
                     </div>
-                    <select
-                        value={filtroTipo}
-                        onChange={(e) => setFiltroTipo(e.target.value)}
-                        className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                    >
-                        <option value="todas">Todas las compras</option>
-                        <option value="contado">Al contado</option>
-                        <option value="credito">A crédito</option>
-                    </select>
-                    <select
-                        value={filtroSucursal}
-                        onChange={(e) => setFiltroSucursal(e.target.value)}
-                        className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                    >
-                        <option value="">Todas las sucursales</option>
-                        {branches.map(b => (
-                            <option key={b.id} value={b.id}>{b.name}</option>
-                        ))}
-                    </select>
                 </div>
-            </div>
 
-            {/* Tabla */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <table className="w-full">
-                    <thead className="bg-gray-50">
-                        <tr>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Fecha</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Factura</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Proveedor</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Descripción</th>
-                            <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Sucursal</th>
-                            <th className="px-4 py-3 text-center text-sm font-medium text-gray-700">Tipo</th>
-                            <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Monto</th>
-                            <th className="px-4 py-3 text-center text-sm font-medium text-gray-700">Estado</th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                        {loading ? (
+                <div className="overflow-x-auto">
+                    <table className="w-full min-w-[1180px] text-sm">
+                        <thead className="bg-slate-50">
                             <tr>
-                                <td colSpan="8" className="px-4 py-8 text-center">
-                                    <RefreshCw className="w-8 h-8 animate-spin mx-auto text-purple-600" />
-                                </td>
+                                <th className="px-4 py-3 text-left font-medium text-slate-600">Fecha</th>
+                                <th className="px-4 py-3 text-left font-medium text-slate-600">Referencia</th>
+                                <th className="px-4 py-3 text-left font-medium text-slate-600">Proveedor</th>
+                                <th className="px-4 py-3 text-left font-medium text-slate-600">Descripcion</th>
+                                <th className="px-4 py-3 text-center font-medium text-slate-600">Distintivo</th>
+                                <th className="px-4 py-3 text-left font-medium text-slate-600">Cuenta</th>
+                                <th className="px-4 py-3 text-center font-medium text-slate-600">Fuente</th>
+                                <th className="px-4 py-3 text-right font-medium text-slate-600">Monto</th>
+                                <th className="px-4 py-3 text-right font-medium text-slate-600">Pendiente</th>
+                                <th className="px-4 py-3 text-center font-medium text-slate-600">Estado pago</th>
                             </tr>
-                        ) : comprasFiltradas.length === 0 ? (
-                            <tr>
-                                <td colSpan="8" className="px-4 py-8 text-center text-gray-500">
-                                    <ShoppingCart className="w-12 h-12 mx-auto mb-4 text-gray-300" />
-                                    <p>No hay compras registradas</p>
-                                </td>
-                            </tr>
-                        ) : (
-                            comprasFiltradas.map((compra) => (
-                                <tr key={compra.id} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 text-sm">{compra.fecha}</td>
-                                    <td className="px-4 py-3 text-sm font-mono">{compra.factura || '-'}</td>
-                                    <td className="px-4 py-3 text-sm font-medium">{compra.proveedor}</td>
-                                    <td className="px-4 py-3 text-sm">{compra.descripcion}</td>
-                                    <td className="px-4 py-3 text-sm">{compra.sucursalName || '-'}</td>
-                                    <td className="px-4 py-3 text-center">
-                                        <span className={`px-2 py-1 rounded-full text-xs ${
-                                            compra.esCredito 
-                                                ? 'bg-amber-100 text-amber-700' 
-                                                : 'bg-green-100 text-green-700'
-                                        }`}>
-                                            {compra.esCredito ? 'Crédito' : 'Contado'}
-                                        </span>
-                                    </td>
-                                    <td className="px-4 py-3 text-right font-medium">
-                                        {formatCurrency(compra.monto, compra.moneda)}
-                                    </td>
-                                    <td className="px-4 py-3 text-center">
-                                        {compra.esCredito ? (
-                                            <span className={`px-2 py-1 rounded-full text-xs ${
-                                                compra.pagada 
-                                                    ? 'bg-green-100 text-green-700' 
-                                                    : 'bg-red-100 text-red-700'
-                                            }`}>
-                                                {compra.pagada ? 'Pagada' : 'Pendiente'}
-                                            </span>
-                                        ) : (
-                                            <span className="px-2 py-1 rounded-full text-xs bg-green-100 text-green-700">
-                                                Pagada
-                                            </span>
-                                        )}
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                            {loading ? (
+                                <tr>
+                                    <td colSpan={10} className="px-4 py-10 text-center">
+                                        <RefreshCw className="w-7 h-7 animate-spin text-amber-600 mx-auto" />
                                     </td>
                                 </tr>
-                            ))
-                        )}
-                    </tbody>
-                </table>
-            </div>
-
-            {/* Modal Nueva Compra */}
-            {showModal && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] overflow-auto">
-                        <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-                            <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                                <ShoppingCart className="w-6 h-6 text-purple-600" />
-                                Nueva Compra
-                            </h2>
-                            <button
-                                onClick={() => setShowModal(false)}
-                                className="p-2 hover:bg-gray-100 rounded-lg"
-                            >
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-
-                        <form onSubmit={handleSubmit} className="p-6 space-y-6">
-                            {/* Información General */}
-                            <div className="bg-gray-50 rounded-xl p-5">
-                                <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-4 flex items-center gap-2">
-                                    <FileText className="w-4 h-4" />
-                                    Información General
-                                </h3>
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                    <FormField label="Fecha" icon={Calendar} required>
-                                        <input
-                                            type="date"
-                                            value={formData.fecha}
-                                            onChange={(e) => setFormData({...formData, fecha: e.target.value})}
-                                            className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            required
-                                        />
-                                    </FormField>
-                                    <FormField label="Sucursal" icon={Store} required>
-                                        <select
-                                            value={formData.sucursalId}
-                                            onChange={(e) => {
-                                                const sucursal = branches.find(s => s.id === e.target.value);
-                                                setFormData({...formData, sucursalId: e.target.value, sucursalName: sucursal?.name || ''});
-                                            }}
-                                            className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            required
-                                        >
-                                            <option value="">Seleccione...</option>
-                                            {branches.map(s => (
-                                                <option key={s.id} value={s.id}>{s.name}</option>
-                                            ))}
-                                        </select>
-                                    </FormField>
-                                    <FormField label="Moneda" icon={DollarSign}>
-                                        <select
-                                            value={formData.moneda}
-                                            onChange={(e) => setFormData({...formData, moneda: e.target.value})}
-                                            className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                        >
-                                            <option value="NIO">Córdobas (NIO)</option>
-                                            <option value="USD">Dólares (USD)</option>
-                                        </select>
-                                    </FormField>
-                                </div>
-                            </div>
-
-                            {/* Detalle de la Compra */}
-                            <div className="bg-gray-50 rounded-xl p-5">
-                                <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-4 flex items-center gap-2">
-                                    <TrendingDown className="w-4 h-4" />
-                                    Detalle de la Compra
-                                </h3>
-                                <div className="space-y-4">
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        <FormField label="Proveedor" icon={User} required>
-                                            <input
-                                                type="text"
-                                                value={formData.proveedor}
-                                                onChange={(e) => setFormData({...formData, proveedor: e.target.value})}
-                                                placeholder="Nombre del proveedor"
-                                                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                                required
-                                            />
-                                        </FormField>
-                                        <FormField label="N° Factura" icon={Tag}>
-                                            <input
-                                                type="text"
-                                                value={formData.factura}
-                                                onChange={(e) => setFormData({...formData, factura: e.target.value})}
-                                                placeholder="Número de factura"
-                                                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            />
-                                        </FormField>
-                                    </div>
-                                    
-                                    <FormField label="Descripción" icon={FileText} required>
-                                        <input
-                                            type="text"
-                                            value={formData.descripcion}
-                                            onChange={(e) => setFormData({...formData, descripcion: e.target.value})}
-                                            placeholder="Descripción de la compra"
-                                            className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            required
-                                        />
-                                    </FormField>
-
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        <FormField label="Monto" icon={DollarSign} required>
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                value={formData.monto}
-                                                onChange={(e) => setFormData({...formData, monto: e.target.value})}
-                                                placeholder="0.00"
-                                                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                                required
-                                            />
-                                        </FormField>
-                                        {formData.moneda === 'USD' && (
-                                            <FormField label="Tipo de Cambio">
-                                                <input
-                                                    type="number"
-                                                    step="0.01"
-                                                    value={formData.tipoCambio}
-                                                    onChange={(e) => setFormData({...formData, tipoCambio: e.target.value})}
-                                                    placeholder="36.50"
-                                                    className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                                />
-                                            </FormField>
-                                        )}
-                                    </div>
-
-                                    <FormField label="Cuenta de Gasto" icon={TrendingDown} required>
-                                        <select
-                                            value={formData.cuentaGastoId}
-                                            onChange={(e) => {
-                                                const cuenta = cuentasGastos.find(c => c.id === e.target.value);
-                                                setFormData({
-                                                    ...formData,
-                                                    cuentaGastoId: e.target.value,
-                                                    cuentaGastoCode: cuenta?.code || '',
-                                                    cuentaGastoName: cuenta?.name || ''
-                                                });
-                                            }}
-                                            className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            required
-                                        >
-                                            <option value="">Seleccione una cuenta...</option>
-                                            {cuentasGastos.map(c => (
-                                                <option key={c.id} value={c.id}>{c.code} - {c.name}</option>
-                                            ))}
-                                        </select>
-                                    </FormField>
-                                </div>
-                            </div>
-
-                            {/* Tipo de Compra */}
-                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-5">
-                                <label className="flex items-start gap-3 cursor-pointer">
-                                    <input
-                                        type="checkbox"
-                                        checked={formData.esCredito}
-                                        onChange={(e) => setFormData({...formData, esCredito: e.target.checked})}
-                                        className="w-5 h-5 text-purple-600 mt-0.5"
-                                    />
-                                    <div>
-                                        <span className="font-medium text-gray-800">Es una compra a crédito</span>
-                                        <p className="text-sm text-gray-600 mt-1">
-                                            Se registrará en Proveedores (210101) para pagar después
-                                        </p>
-                                    </div>
-                                </label>
-                            </div>
-
-                            {/* Método de Pago (solo si es contado) */}
-                            {!formData.esCredito && (
-                                <div className="bg-gray-50 rounded-xl p-5">
-                                    <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wide mb-4 flex items-center gap-2">
-                                        <CreditCard className="w-4 h-4" />
-                                        Método de Pago
-                                    </h3>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        <FormField label="Método de Pago">
-                                            <select
-                                                value={formData.metodoPago}
-                                                onChange={(e) => setFormData({...formData, metodoPago: e.target.value, bancoId: ''})}
-                                                className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                            >
-                                                <option value="efectivo">Efectivo</option>
-                                                <option value="transferencia">Transferencia Bancaria</option>
-                                                <option value="cheque">Cheque</option>
-                                            </select>
-                                        </FormField>
-                                        {formData.metodoPago !== 'efectivo' && (
-                                            <FormField label="Banco" icon={Building2} required={formData.metodoPago !== 'efectivo'}>
-                                                <select
-                                                    value={formData.bancoId}
-                                                    onChange={(e) => setFormData({...formData, bancoId: e.target.value})}
-                                                    className="w-full px-3 py-2.5 bg-white border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                                                    required={formData.metodoPago !== 'efectivo'}
-                                                >
-                                                    <option value="">Seleccione un banco...</option>
-                                                    {cuentasBanco.map(b => (
-                                                        <option key={b.id} value={b.id}>{b.code} - {b.name}</option>
-                                                    ))}
-                                                </select>
-                                            </FormField>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Mensajes */}
-                            {error && (
-                                <div className="p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-red-700">
-                                    <AlertCircle className="w-5 h-5" />
-                                    {error}
-                                </div>
-                            )}
-
-                            {success && (
-                                <div className="p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2 text-green-700">
-                                    <CheckCircle className="w-5 h-5" />
-                                    {success}
-                                </div>
-                            )}
-
-                            <div className="flex gap-3">
-                                <button
-                                    type="button"
-                                    onClick={() => setShowModal(false)}
-                                    className="flex-1 px-4 py-3 border border-gray-300 rounded-lg hover:bg-gray-50"
-                                >
-                                    Cancelar
-                                </button>
-                                <button
-                                    type="submit"
-                                    disabled={submitting}
-                                    className="flex-1 px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center justify-center gap-2"
-                                >
-                                    {submitting ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
-                                    {submitting ? 'Registrando...' : 'Registrar Compra'}
-                                </button>
-                            </div>
-                        </form>
-                    </div>
+                            ) : documentosFiltrados.length === 0 ? (
+                                <tr>
+                                    <td colSpan={10} className="px-4 py-12 text-center text-slate-500">
+                                        No hay compras o gastos para los filtros seleccionados.
+                                    </td>
+                                </tr>
+                            ) : documentosFiltrados.map((documento) => (
+                                <tr key={documento.mergedId} className="hover:bg-slate-50">
+                                    <td className="px-4 py-3 text-slate-600">{formatShortDate(documento.fechaPrincipal)}</td>
+                                    <td className="px-4 py-3">
+                                        <div className="font-medium text-slate-900">{documento.referencia || documento.documentoId}</div>
+                                        <div className="text-xs text-slate-500">{documento.collectionName}</div>
+                                    </td>
+                                    <td className="px-4 py-3">
+                                        <div className="font-medium text-slate-900">{documento.proveedorNombre}</div>
+                                        <div className="text-xs text-slate-500">{documento.sucursalName || GRANADA_BRANCH_NAME}</div>
+                                    </td>
+                                    <td className="px-4 py-3 text-slate-600 max-w-md">
+                                        <div className="truncate" title={documento.descripcion || ''}>
+                                            {documento.descripcion || '-'}
+                                        </div>
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${categoryStyles[documento.category]}`}>
+                                            {documento.category === 'mercaderia' ? 'Mercaderia / CMV' : 'Gasto'}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-slate-600">
+                                        {documento.cuentaCode ? `${documento.cuentaCode} - ${documento.cuentaName}` : '-'}
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${sourceStyles[documento.source]}`}>
+                                            {documento.source}
+                                        </span>
+                                    </td>
+                                    <td className="px-4 py-3 text-right font-semibold text-slate-900">
+                                        {formatCurrency(documento.monto, documento.moneda)}
+                                    </td>
+                                    <td className="px-4 py-3 text-right text-amber-700">
+                                        {documento.paymentStatus === 'pendiente'
+                                            ? formatCurrency(documento.saldoPendiente || documento.monto, documento.moneda)
+                                            : '-'}
+                                    </td>
+                                    <td className="px-4 py-3 text-center">
+                                        <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${paymentStyles[documento.paymentStatus]}`}>
+                                            {documento.paymentStatus === 'pagada'
+                                                ? 'Pagada'
+                                                : documento.paymentStatus === 'pendiente'
+                                                    ? 'Pendiente'
+                                                    : 'Anulada'}
+                                        </span>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
-            )}
+            </div>
         </div>
     );
 };
