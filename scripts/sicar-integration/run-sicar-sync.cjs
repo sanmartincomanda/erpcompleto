@@ -169,6 +169,24 @@ const fetchArCreditsSince = async (db, sinceDate, limit = 0) =>
         [sinceDate, sinceDate]
     );
 
+const fetchOpenArCredits = async (db) =>
+    db.query(
+        `SELECT ccl.*, cli.nombre AS clienteNombre, cli.clave AS clienteClave, v.fecha AS venta_fecha, v.caj_id, ca.nombre AS caja_nombre
+         FROM creditocliente ccl
+         LEFT JOIN cliente cli ON cli.cli_id = ccl.cli_id
+         LEFT JOIN venta v ON v.ven_id = ccl.ven_id
+         LEFT JOIN caja ca ON ca.caj_id = v.caj_id
+         LEFT JOIN (
+            SELECT ccl_id, SUM(total) AS totalAbonado
+            FROM abonocliente
+            WHERE status = 1
+            GROUP BY ccl_id
+         ) ab ON ab.ccl_id = ccl.ccl_id
+         WHERE ccl.status <> -1
+           AND GREATEST(0, ccl.total - IFNULL(ab.totalAbonado, 0)) > 0.01
+         ORDER BY ccl.ccl_id ASC`
+    );
+
 const fetchArCreditsByIds = async (db, creditIds = []) =>
     db.queryInChunks(
         creditIds,
@@ -376,6 +394,9 @@ const run = async () => {
         const arCreditsPromise = runtimeConfig.cli.modules.includes('ar')
             ? fetchArCreditsSince(mysql, runtimeConfig.cli.sinceDate, runtimeConfig.cli.limit)
             : Promise.resolve([]);
+        const openArCreditsPromise = runtimeConfig.cli.modules.includes('ar')
+            ? fetchOpenArCredits(mysql)
+            : Promise.resolve([]);
         const arPaymentsPromise = runtimeConfig.cli.modules.includes('ar')
             ? fetchArPaymentsSince(mysql, runtimeConfig.cli.sinceDate)
             : Promise.resolve([]);
@@ -393,6 +414,7 @@ const run = async () => {
             recentSales,
             recentPurchases,
             recentArCredits,
+            openArCredits,
             recentArPayments,
             recentApCredits,
             recentApPayments
@@ -403,6 +425,7 @@ const run = async () => {
             recentSalesPromise,
             recentPurchasesPromise,
             arCreditsPromise,
+            openArCreditsPromise,
             arPaymentsPromise,
             apCreditsPromise,
             apPaymentsPromise
@@ -418,7 +441,7 @@ const run = async () => {
             extraApCreditIds.length ? fetchApCreditsByIds(mysql, extraApCreditIds) : Promise.resolve([])
         ]);
 
-        const arCredits = dedupeBy([...recentArCredits, ...extraArCredits], 'ccl_id');
+        const arCredits = dedupeBy([...recentArCredits, ...openArCredits, ...extraArCredits], 'ccl_id');
         const apCredits = dedupeBy([...recentApCredits, ...extraApCredits], 'cpr_id');
 
         const [allArPayments, allApPayments] = await Promise.all([
@@ -643,6 +666,7 @@ const run = async () => {
             saleDetails: saleDetails.length,
             salePayments: salePayments.length,
             arCredits: arCredits.length,
+            openArCredits: openArCredits.length,
             arPayments: allArPayments.length,
             purchases: purchases.length,
             purchaseDetails: purchaseDetails.length,
