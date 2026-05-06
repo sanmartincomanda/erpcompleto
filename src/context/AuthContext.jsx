@@ -11,11 +11,11 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, updateDoc, Timestamp, collection, getDocs } from 'firebase/firestore';
 
-// Definición de roles
+// DefiniciÃ³n de roles
 export const ROLES = {
     ADMIN: 'admin',           // Acceso total
     CONTADOR: 'contador',     // Contabilidad, reportes
-    CAJERO: 'cajero',         // Cierre de caja, depósitos
+    CAJERO: 'cajero',         // Cierre de caja, depÃ³sitos
     CONSULTA: 'consulta'      // Solo lectura
 };
 
@@ -31,7 +31,7 @@ export const PERMISOS = {
         puedePagarProveedores: true,
         puedeConfigurar: true,
         puedeVerReportes: true,
-        modulos: ['*'] // Todos los módulos
+        modulos: ['*'] // Todos los mÃ³dulos
     },
     [ROLES.CONTADOR]: {
         puedeCrear: true,
@@ -49,6 +49,7 @@ export const PERMISOS = {
             'inventario-fisico',
             'conciliacion-bancaria',
             'movimientos-contables',
+            'cuentas-cobrar',
             'cuentas-pagar',
             'proveedores',
             'reportes',
@@ -91,6 +92,7 @@ export const PERMISOS = {
             'conciliacion-bancaria',
             'movimientos-contables',
             'reportes',
+            'cuentas-cobrar',
             'dashboard-financiero',
             'cuentas-pagar',
             'proveedores'
@@ -180,7 +182,7 @@ export const AuthProvider = ({ children }) => {
 
     const login = async (email, password) => {
         const result = await signInWithEmailAndPassword(auth, email, password);
-        // Verificar si el usuario está activo
+        // Verificar si el usuario estÃ¡ activo
         const userDoc = await getDoc(doc(db, 'usuarios', result.user.uid));
         if (userDoc.exists()) {
             const data = userDoc.data();
