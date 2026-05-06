@@ -135,9 +135,10 @@ const fetchPurchaseDetails = async (db, purchaseIds = []) =>
     db.queryInChunks(
         purchaseIds,
         () => `
-            SELECT *
-            FROM detallec
-            WHERE com_id IN (?)
+            SELECT dc.*, art.caracteristicas AS articuloComentario
+            FROM detallec dc
+            LEFT JOIN articulo art ON art.art_id = dc.art_id
+            WHERE dc.com_id IN (?)
             ORDER BY com_id ASC, orden ASC, art_id ASC
         `,
         MAX_SQL_IN_IDS
@@ -266,6 +267,7 @@ const buildSeedConfigDocument = ({ runtimeConfig, syncedAt, integrationConfig = 
     notes: 'Configuracion semillada automaticamente para el espejo SICAR -> Firebase en Granada.',
     operationProfile: buildFixedOperationProfile(integrationConfig),
     paymentTypeMap: PAYMENT_METHODS,
+    expenseSkuAccountMap: integrationConfig.expenseSkuAccountMap || {},
     syncPolicies: {
         softCancel: true,
         markZeroAmountAbonos: true,
