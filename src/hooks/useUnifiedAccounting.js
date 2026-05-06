@@ -1,6 +1,6 @@
 // src/hooks/useUnifiedAccounting.js
 // Hook unificado para el ERP - Centraliza todas las operaciones contables
-// CORREGIDO: Mejorada la detección de cuentas bancarias
+// CORREGIDO: Mejorada la detecciÃ³n de cuentas bancarias
 
 import { useState, useEffect, useCallback } from 'react';
 import { db } from '../firebase';
@@ -29,14 +29,14 @@ const isAccountActive = (account) => {
 
 const normalizeNumber = (value) => Number(value) || 0;
 
-// CORREGIDO: Función mejorada para detectar cuentas bancarias (formato DGI Nicaragua)
+// CORREGIDO: FunciÃ³n mejorada para detectar cuentas bancarias (formato DGI Nicaragua)
 const isBancoAccount = (account) => {
     if (!account || account.isGroup) return false;
     
     // Verificar por subType
     if (account.subType === 'banco') return true;
     
-    // Verificar por código (cuentas bancarias DGI: 110103 - Bancos Cuentas Corrientes)
+    // Verificar por cÃ³digo (cuentas bancarias DGI: 110103 - Bancos Cuentas Corrientes)
     if (account.code && (
         account.code.startsWith('110103') ||  // Bancos
         account.code.startsWith('1102')       // Inversiones temporales
@@ -56,23 +56,23 @@ const isBancoAccount = (account) => {
     return false;
 };
 
-// CORREGIDO: Función EXCLUSIVA para detectar cuentas de caja (formato DGI Nicaragua)
-// Solo acepta códigos 110101 (Caja General) y 110102 (Caja Chica)
-// NUNCA 110104 (Dinero en Tránsito)
+// CORREGIDO: FunciÃ³n EXCLUSIVA para detectar cuentas de caja (formato DGI Nicaragua)
+// Solo acepta cÃ³digos 110101 (Caja General) y 110102 (Caja Chica)
+// NUNCA 110104 (Dinero en TrÃ¡nsito)
 const isCajaAccount = (account) => {
     if (!account || account.isGroup) return false;
     
     const nameLower = (account.name || '').toLowerCase();
     
-    // EXCLUIR explícitamente cuentas de tránsito por nombre
-    if (nameLower.includes('transito') || nameLower.includes('tránsito')) {
+    // EXCLUIR explÃ­citamente cuentas de trÃ¡nsito por nombre
+    if (nameLower.includes('transito') || nameLower.includes('trÃ¡nsito')) {
         return false;
     }
     
-    // EXCLUSIVAMENTE códigos 110101 y 110102
+    // EXCLUSIVAMENTE cÃ³digos 110101 y 110102
     if (account.code) {
         const code = account.code.replace(/\./g, ''); // Quitar puntos
-        // RECHAZAR explícitamente 110104
+        // RECHAZAR explÃ­citamente 110104
         if (code === '110104' || code.startsWith('110104')) {
             return false;
         }
@@ -88,7 +88,7 @@ const isCajaAccount = (account) => {
     // Verificar por nombre - palabras clave de caja (pero NO transito)
     if ((nameLower.includes('caja') || nameLower.includes('cajas')) && 
         !nameLower.includes('transito') && 
-        !nameLower.includes('tránsito') &&
+        !nameLower.includes('trÃ¡nsito') &&
         !nameLower.includes('diferencia')) {
         return true;
     }
@@ -96,27 +96,27 @@ const isCajaAccount = (account) => {
     return false;
 };
 
-// CORREGIDO: Función mejorada para detectar cuentas en tránsito (formato DGI Nicaragua)
+// CORREGIDO: FunciÃ³n mejorada para detectar cuentas en trÃ¡nsito (formato DGI Nicaragua)
 const isTransitoAccount = (account) => {
     if (!account || account.isGroup) return false;
     
     // Verificar por subType
     if (account.subType === 'transito') return true;
     
-    // Verificar por código (tránsito DGI: 110104 - Dinero en Tránsito)
+    // Verificar por cÃ³digo (trÃ¡nsito DGI: 110104 - Dinero en TrÃ¡nsito)
     if (account.code && account.code.startsWith('110104')) return true;
     
     // Verificar por nombre
     if (account.name) {
         const nameLower = account.name.toLowerCase();
-        if (nameLower.includes('transito') || nameLower.includes('tránsito')) return true;
+        if (nameLower.includes('transito') || nameLower.includes('trÃ¡nsito')) return true;
     }
     
     return false;
 };
 
 // ============================================
-// HOOK: PLAN DE CUENTAS CON CACHÉ
+// HOOK: PLAN DE CUENTAS CON CACHÃ‰
 // ============================================
 
 export const usePlanCuentas = () => {
@@ -124,19 +124,19 @@ export const usePlanCuentas = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
-    // Cargar desde caché al inicio
+    // Cargar desde cachÃ© al inicio
     useEffect(() => {
         const cached = localStorage.getItem('erp_cache_planCuentas');
         if (cached) {
             try {
                 const parsed = JSON.parse(cached);
-                // Solo usar caché si tiene menos de 10 minutos
+                // Solo usar cachÃ© si tiene menos de 10 minutos
                 if (Date.now() - parsed.timestamp < 10 * 60 * 1000) {
                     setAccounts(parsed.data);
                     setLoading(false);
                 }
             } catch (e) {
-                console.log('Caché inválido, recargando...');
+                console.log('CachÃ© invÃ¡lido, recargando...');
             }
         }
     }, []);
@@ -152,7 +152,7 @@ export const usePlanCuentas = () => {
                     .map((d) => ({ id: d.id, ...d.data() }))
                     .filter(isAccountActive);
 
-                // Guardar en caché
+                // Guardar en cachÃ©
                 localStorage.setItem('erp_cache_planCuentas', JSON.stringify({
                     data,
                     timestamp: Date.now()
@@ -194,7 +194,7 @@ export const usePlanCuentas = () => {
             .sort((a, b) => (a.code || '').localeCompare(b.code || ''));
     }, [accounts]);
 
-    // CORREGIDO: getBancoAccounts mejorado con detección flexible
+    // CORREGIDO: getBancoAccounts mejorado con detecciÃ³n flexible
     const getBancoAccounts = useCallback((currency = 'NIO') => {
         return accounts
             .filter((acc) =>
@@ -248,6 +248,18 @@ export const usePlanCuentas = () => {
         ) || null;
     }, [accounts]);
 
+    const getClientesAccount = useCallback(() => {
+        return accounts.find((a) =>
+            a.code === '110301' ||
+            a.code === '1103.01' ||
+            (
+                a.type === 'ACTIVO' &&
+                a.name?.toLowerCase().includes('clientes') &&
+                a.name?.toLowerCase().includes('cuentas por cobrar')
+            )
+        ) || null;
+    }, [accounts]);
+
     return {
         accounts,
         loading,
@@ -261,12 +273,13 @@ export const usePlanCuentas = () => {
         getGastoAccounts,
         getPasivoAccounts,
         getIngresoAccounts,
-        getProveedoresAccount
+        getProveedoresAccount,
+        getClientesAccount
     };
 };
 
 // ============================================
-// HOOK: MOVIMIENTOS CONTABLES CON PAGINACIÓN
+// HOOK: MOVIMIENTOS CONTABLES CON PAGINACIÃ“N
 // ============================================
 
 export const useMovimientosContables = (filters = {}, options = {}) => {
@@ -277,7 +290,7 @@ export const useMovimientosContables = (filters = {}, options = {}) => {
     const [hasMore, setHasMore] = useState(true);
     const [lastDoc, setLastDoc] = useState(null);
 
-    // Cargar desde caché al inicio
+    // Cargar desde cachÃ© al inicio
     useEffect(() => {
         if (!useCache) return;
         const cacheKey = `erp_cache_movimientos_${JSON.stringify(filters)}`;
@@ -290,7 +303,7 @@ export const useMovimientosContables = (filters = {}, options = {}) => {
                     setLoading(false);
                 }
             } catch (e) {
-                // Caché inválido
+                // CachÃ© invÃ¡lido
             }
         }
     }, [filters, useCache]);
@@ -338,7 +351,7 @@ export const useMovimientosContables = (filters = {}, options = {}) => {
                     data = data.filter((m) => m.referencia?.includes(filters.referencia));
                 }
 
-                // Guardar en caché
+                // Guardar en cachÃ©
                 if (useCache) {
                     const cacheKey = `erp_cache_movimientos_${JSON.stringify(filters)}`;
                     localStorage.setItem(cacheKey, JSON.stringify({
@@ -372,7 +385,7 @@ export const useMovimientosContables = (filters = {}, options = {}) => {
         useCache
     ]);
 
-    // Cargar más (paginación)
+    // Cargar mÃ¡s (paginaciÃ³n)
     const loadMore = useCallback(async () => {
         if (!lastDoc || !hasMore) return;
         
@@ -506,7 +519,7 @@ export const useCierresCajaERP = (filters = {}) => {
 };
 
 // ============================================
-// HOOK: DEPÓSITOS EN TRÁNSITO
+// HOOK: DEPÃ“SITOS EN TRÃNSITO
 // ============================================
 
 export const useDepositosTransitoERP = (estado = null) => {
@@ -532,7 +545,7 @@ export const useDepositosTransitoERP = (estado = null) => {
                 setLoading(false);
             },
             (err) => {
-                console.error('Error cargando depósitos:', err);
+                console.error('Error cargando depÃ³sitos:', err);
                 setError(err.message);
                 setLoading(false);
             }
@@ -554,7 +567,7 @@ export const useDepositosTransitoERP = (estado = null) => {
 };
 
 // ============================================
-// HOOK: DEPÓSITOS BANCARIOS
+// HOOK: DEPÃ“SITOS BANCARIOS
 // ============================================
 
 export const useDepositosBancariosERP = (filters = {}) => {
@@ -586,7 +599,7 @@ export const useDepositosBancariosERP = (filters = {}) => {
                 setLoading(false);
             },
             (err) => {
-                console.error('Error cargando depósitos bancarios:', err);
+                console.error('Error cargando depÃ³sitos bancarios:', err);
                 setError(err.message);
                 setLoading(false);
             }
@@ -689,7 +702,7 @@ export const useDashboardERP = () => {
 
         saldos.patrimonio = saldos.activos - saldos.pasivos;
 
-        // CORREGIDO: Usar funciones mejoradas de detección
+        // CORREGIDO: Usar funciones mejoradas de detecciÃ³n
         const cajasNIO = accounts.filter((a) => isCajaAccount(a) && ((a.currency || 'NIO') === 'NIO'));
         const cajasUSD = accounts.filter((a) => isCajaAccount(a) && a.currency === 'USD');
 
