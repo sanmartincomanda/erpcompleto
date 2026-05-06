@@ -280,20 +280,20 @@ const Inicio = () => {
     const modules = [
         {
             title: 'Plan de Cuentas',
-            description: 'Gestione el catálogo de cuentas contables',
+            description: 'Gestione el catÃ¡logo de cuentas contables',
             icon: BookOpen,
             path: '/plan-cuentas',
             color: 'bg-blue-500'
         },
         {
             title: 'Activos Fijos',
-            description: 'Registre compras de activos y depreciación',
+            description: 'Registre compras de activos y depreciaciÃ³n',
             icon: Package,
             path: '/activos-fijos',
             color: 'bg-amber-500'
         },
         {
-            title: 'Conciliación Bancaria',
+            title: 'ConciliaciÃ³n Bancaria',
             description: 'Suba CSV del banco y concilie contra libros',
             icon: Landmark,
             path: '/conciliacion-bancaria',
@@ -303,8 +303,36 @@ const Inicio = () => {
             title: 'Ventas y Gastos',
             description: 'Registre operaciones diarias',
             icon: DollarSign,
-            path: '/dataentry',
+            path: '/data-entry',
             color: 'bg-green-500'
+        },
+        {
+            title: 'Ventas',
+            description: 'Revise ventas manuales y de SICAR',
+            icon: TrendingUp,
+            path: '/ventas',
+            color: 'bg-emerald-500'
+        },
+        {
+            title: 'Cuentas por Cobrar',
+            description: 'Controle cartera y abonos de clientes',
+            icon: CheckCircle,
+            path: '/cuentas-cobrar',
+            color: 'bg-lime-500'
+        },
+        {
+            title: 'Inventario SICAR',
+            description: 'Consulte saldos y costos de productos',
+            icon: Package,
+            path: '/inventario',
+            color: 'bg-sky-500'
+        },
+        {
+            title: 'Compras y Gastos',
+            description: 'Unifique mercaderia vendida y gastos',
+            icon: Building2,
+            path: '/compras',
+            color: 'bg-orange-500'
         },
         {
             title: 'Cierre de Caja',
@@ -314,15 +342,15 @@ const Inicio = () => {
             color: 'bg-purple-500'
         },
         {
-            title: 'Depósitos',
-            description: 'Gestione depósitos en tránsito',
+            title: 'DepÃ³sitos',
+            description: 'Gestione depÃ³sitos en trÃ¡nsito',
             icon: ArrowRightLeft,
             path: '/depositos-transito',
             color: 'bg-orange-500'
         },
         {
-            title: 'Confirmar Depósito',
-            description: 'Confirme depósitos bancarios',
+            title: 'Confirmar DepÃ³sito',
+            description: 'Confirme depÃ³sitos bancarios',
             icon: CheckCircle,
             path: '/confirmar-deposito',
             color: 'bg-teal-500'
@@ -342,7 +370,7 @@ const Inicio = () => {
             color: 'bg-indigo-500'
         },
         {
-            title: 'Configuración',
+            title: 'ConfiguraciÃ³n',
             description: 'Configure el sistema',
             icon: Settings,
             path: '/configuracion',
@@ -357,7 +385,7 @@ const Inicio = () => {
                     Bienvenido al ERP Carnessanmartin
                 </h1>
                 <p className="text-gray-600">
-                    Sistema de gestión contable y financiera - Sucursal Granada
+                    Sistema de gestiÃ³n contable y financiera - Sucursal Granada
                 </p>
             </div>
 
@@ -398,7 +426,7 @@ const Inicio = () => {
                 <div className="bg-white rounded-lg shadow p-4 border-l-4 border-orange-500">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm text-gray-500">Depósitos Pendientes</p>
+                            <p className="text-sm text-gray-500">DepÃ³sitos Pendientes</p>
                             <p className="text-2xl font-bold text-gray-900">
                                 {loadingStats ? <RefreshCw className="w-6 h-6 animate-spin text-orange-500" /> : stats.depositosPendientes}
                             </p>
@@ -408,7 +436,7 @@ const Inicio = () => {
                 </div>
             </div>
 
-            <h2 className="text-xl font-bold text-gray-900 mb-4">Módulos del Sistema</h2>
+            <h2 className="text-xl font-bold text-gray-900 mb-4">MÃ³dulos del Sistema</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                 {modules.map((module) => {
                     const Icon = module.icon;
@@ -429,10 +457,10 @@ const Inicio = () => {
             </div>
 
             <div className="mt-8 bg-blue-50 rounded-lg p-6">
-                <h3 className="font-bold text-blue-900 mb-2">¿Necesita ayuda?</h3>
+                <h3 className="font-bold text-blue-900 mb-2">Â¿Necesita ayuda?</h3>
                 <p className="text-blue-700 text-sm">
-                    Este sistema está integrado con el Plan de Cuentas NIC. Todas las transacciones
-                    generan asientos contables automáticamente. Para soporte técnico, contacte al
+                    Este sistema estÃ¡ integrado con el Plan de Cuentas NIC. Todas las transacciones
+                    generan asientos contables automÃ¡ticamente. Para soporte tÃ©cnico, contacte al
                     administrador del sistema.
                 </p>
             </div>
