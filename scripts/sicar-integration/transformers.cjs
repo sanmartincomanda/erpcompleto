@@ -43,7 +43,7 @@ const summarizeLineItems = (items = [], maxItems = 3) => {
 
     if (!labels.length) return '';
     if (items.length <= maxItems) return labels.join(' + ');
-    return `${labels.join(' + ')} +${items.length - maxItems} más`;
+    return `${labels.join(' + ')} +${items.length - maxItems} mÃ¡s`;
 };
 
 const buildSourceMetadata = ({ sourceTable, sourceId, sourceStatus, payload, syncedAt }) => ({
@@ -96,6 +96,20 @@ const buildPaymentSummary = (payments = []) => {
     };
 };
 
+const normalizeAccountCode = (rawValue) => cleanString(rawValue).replace(/\./g, '').toUpperCase();
+
+const buildExpenseNarrative = (details = [], purchase = {}) => {
+    const comments = [...new Set(details.map((item) => cleanString(item.articuloComentario)).filter(Boolean))];
+    const lineSummary = summarizeLineItems(details);
+    const accountComment = comments[0] || '';
+
+    return {
+        descripcion: accountComment || lineSummary || `Gasto SICAR ${purchase.com_id}`,
+        comentarioArticulo: accountComment,
+        resumenDetalle: lineSummary
+    };
+};
+
 const DEFAULT_OPERATION_PROFILE = {
     branchId: 'granada',
     branchCode: 'granada',
@@ -118,15 +132,23 @@ const buildFixedOperationProfile = (integrationConfig = {}) => {
 
 const createReferenceContext = ({ branches = [], accounts = [], integrationConfig = {} }) => {
     const accountsByCode = new Map();
+    const expenseSkuAccountMap = new Map();
 
     for (const account of accounts) {
-        const normalizedCode = cleanString(account.code).replace(/\./g, '');
+        const normalizedCode = normalizeAccountCode(account.code);
         if (normalizedCode) accountsByCode.set(normalizedCode, account);
+    }
+
+    const rawExpenseSkuAccountMap = integrationConfig.expenseSkuAccountMap || integrationConfig.expenseArticleAccountMap || {};
+    for (const [rawSku, rawAccountCode] of Object.entries(rawExpenseSkuAccountMap)) {
+        const sku = normalizeAccountCode(rawSku);
+        const accountCode = normalizeAccountCode(rawAccountCode);
+        if (sku && accountCode) expenseSkuAccountMap.set(sku, accountCode);
     }
 
     const getAccount = (...codes) => {
         for (const code of codes) {
-            const normalizedCode = cleanString(code).replace(/\./g, '');
+            const normalizedCode = normalizeAccountCode(code);
             if (accountsByCode.has(normalizedCode)) {
                 return accountsByCode.get(normalizedCode);
             }
@@ -138,6 +160,9 @@ const createReferenceContext = ({ branches = [], accounts = [], integrationConfi
         branches,
         operationProfile: buildFixedOperationProfile(integrationConfig),
         paymentTypeMap: integrationConfig.paymentTypeMap || PAYMENT_METHODS,
+        expenseSkuAccountMap,
+        accountsByCode,
+        getAccountByCode: (code) => accountsByCode.get(normalizeAccountCode(code)) || null,
         defaultAccounts: {
             supplierLiability: getAccount('210101'),
             customerReceivable: getAccount('110301'),
@@ -162,6 +187,72 @@ const resolveBranch = (context, source = {}) => {
         needsReview: false,
         sourceCajaId: cajaId,
         sourceCajaName: cajaName
+    };
+};
+
+const resolveExpenseAccount = (reference, details = []) => {
+    const matches = [];
+    const uniqueMatches = new Map();
+    const warnings = [];
+
+    for (const item of details) {
+        const sku = cleanString(item.clave || item.sku);
+        const normalizedSku = normalizeAccountCode(sku);
+        if (!normalizedSku) continue;
+
+        const mappedCode = reference.expenseSkuAccountMap.get(normalizedSku) || normalizedSku;
+        const account = reference.getAccountByCode(mappedCode);
+        if (!account) continue;
+
+        const source = reference.expenseSkuAccountMap.has(normalizedSku) ? 'expenseSkuAccountMap' : 'skuExact';
+        const uniqueKey = String(account.id || account.code || mappedCode);
+        const match = {
+            sku,
+            accountId: account.id || '',
+            accountCode: cleanString(account.code),
+            accountName: cleanString(account.name),
+            source
+        };
+
+        matches.push(match);
+        if (!uniqueMatches.has(uniqueKey)) {
+            uniqueMatches.set(uniqueKey, {
+                account,
+                source
+            });
+        }
+    }
+
+    if (uniqueMatches.size === 1) {
+        const [resolved] = [...uniqueMatches.values()];
+        return {
+            account: resolved.account,
+            source: resolved.source,
+            matches,
+            warnings
+        };
+    }
+
+    if (uniqueMatches.size > 1) {
+        const [resolved] = [...uniqueMatches.values()];
+        warnings.push(`expenseAccountMultipleMatch:${[...uniqueMatches.values()].map((item) => cleanString(item.account.code)).join(',')}`);
+        return {
+            account: resolved.account,
+            source: 'multipleMatchesFirstSelected',
+            matches,
+            warnings
+        };
+    }
+
+    if (details.some((item) => cleanString(item.clave || item.sku))) {
+        warnings.push('expenseAccountNoSkuMatch');
+    }
+
+    return {
+        account: reference.defaultAccounts.genericExpense || null,
+        source: reference.defaultAccounts.genericExpense ? 'fallbackGenericExpense' : 'unresolved',
+        matches,
+        warnings
     };
 };
 
@@ -504,6 +595,11 @@ const buildPurchaseDocs = ({
             factura: cleanString(purchase.serieFolio || purchase.folio) || `COM-${purchase.com_id}`,
             metodoPago: credit ? 'credito' : payments.metodoPrincipal,
             metodosPagoDetalle: payments.detail,
+            clasificacionContable: 'costo_mercaderia_vendida',
+            cuentaCostoId: costAccount?.id || '',
+            cuentaCostoCode: costAccount?.code || '',
+            cuentaCostoName: costAccount?.name || '',
+            cuentaCostoType: costAccount?.type || 'COSTO',
             cuentaGastoId: costAccount?.id || '',
             cuentaGastoCode: costAccount?.code || '',
             cuentaGastoName: costAccount?.name || '',
@@ -557,8 +653,10 @@ const buildExpenseDocs = ({
         const supplier = suppliersById.get(String(purchase.pro_id)) || null;
         const branch = resolveBranch(reference, purchase);
         const mirrorId = buildMirrorDocId('gasto', purchase.com_id);
-        const expenseAccount = reference.defaultAccounts.genericExpense;
-        const warnings = [];
+        const expenseAccountResolution = resolveExpenseAccount(reference, details);
+        const expenseAccount = expenseAccountResolution.account || reference.defaultAccounts.genericExpense;
+        const warnings = [...expenseAccountResolution.warnings];
+        const expenseNarrative = buildExpenseNarrative(details, purchase);
 
         const payload = {
             documentoId: mirrorId,
@@ -571,8 +669,10 @@ const buildExpenseDocs = ({
             sourceCajaName: branch.sourceCajaName,
             proveedorId: supplier ? buildMirrorDocId('proveedor', supplier.pro_id) : '',
             proveedor: cleanString(supplier?.nombre || purchase.proveedorNombre),
-            concepto: summarizeLineItems(details) || `Gasto SICAR ${purchase.com_id}`,
-            descripcion: summarizeLineItems(details) || `Gasto SICAR ${purchase.com_id}`,
+            concepto: expenseNarrative.descripcion,
+            descripcion: expenseNarrative.descripcion,
+            comentarioSicar: expenseNarrative.comentarioArticulo,
+            descripcionDetalle: expenseNarrative.resumenDetalle,
             categoria: 'sicar',
             monto: toNumber(purchase.total),
             montoUSD: normalizeCurrency(purchase.monAbr) === 'USD' ? toNumber(purchase.total) : 0,
@@ -580,6 +680,8 @@ const buildExpenseDocs = ({
             factura: cleanString(purchase.serieFolio || purchase.folio) || `GAS-${purchase.com_id}`,
             metodoPago: payments.metodoPrincipal,
             metodosPagoDetalle: payments.detail,
+            origenCuentaGasto: expenseAccountResolution.source,
+            cuentaGastoMatchItems: expenseAccountResolution.matches,
             cuentaGastoId: expenseAccount?.id || '',
             cuentaGastoCode: expenseAccount?.code || '',
             cuentaGastoName: expenseAccount?.name || '',
@@ -588,6 +690,7 @@ const buildExpenseDocs = ({
                 artId: item.art_id,
                 sku: cleanString(item.clave),
                 descripcion: cleanString(item.descripcion),
+                comentarioArticulo: cleanString(item.articuloComentario),
                 cantidad: toNumber(item.cantidad),
                 unidad: cleanString(item.unidad),
                 precio: toNumber(item.precioCon),
@@ -630,10 +733,22 @@ const buildApCreditDocs = ({
     const saldoPendiente = Math.max(0, toNumber(credit.total) - totalAbonado);
     const branch = resolveBranch(reference, purchase || credit);
     const mirrorId = buildMirrorDocId('creditoproveedor', credit.cpr_id);
-    const expenseAccount = Number(purchase?.gasto) === 1
-        ? reference.defaultAccounts.genericExpense
-        : reference.defaultAccounts.costExpense;
+    const expenseAccountResolution = Number(purchase?.gasto) === 1
+        ? resolveExpenseAccount(reference, purchase?.items || [])
+        : {
+            account: reference.defaultAccounts.costExpense,
+            source: 'costOfGoodsSold',
+            matches: [],
+            warnings: []
+        };
+    const expenseAccount = expenseAccountResolution.account || reference.defaultAccounts.genericExpense;
     const supplierAccount = reference.defaultAccounts.supplierLiability;
+    const expenseNarrative = Number(purchase?.gasto) === 1
+        ? buildExpenseNarrative(purchase?.items || [], purchase || {})
+        : {
+            descripcion: summarizeLineItems(purchase ? (purchase.items || []) : []) || `Compra a credito ${credit.com_id}`,
+            comentarioArticulo: ''
+        };
     const payload = {
         documentoId: mirrorId,
         proveedorId: supplier ? buildMirrorDocId('proveedor', supplier.pro_id) : '',
@@ -642,11 +757,19 @@ const buildApCreditDocs = ({
         numeroFactura: cleanString(purchase?.serieFolio || purchase?.folio) || `COM-${credit.com_id}`,
         fechaEmision: toIsoDate(purchase?.fecha),
         fechaVencimiento: toIsoDate(credit.fechaLimite),
-        descripcion: summarizeLineItems(purchase ? (purchase.items || []) : []) || (Number(purchase?.gasto) === 1 ? `Gasto a credito ${credit.com_id}` : `Compra a credito ${credit.com_id}`),
+        descripcion: expenseNarrative.descripcion,
+        comentarioSicar: expenseNarrative.comentarioArticulo,
         monto: toNumber(credit.total),
         saldoPendiente,
         montoAbonado: totalAbonado,
         moneda: normalizeCurrency(purchase?.monAbr),
+        clasificacionContable: Number(purchase?.gasto) === 1 ? 'gasto' : 'costo_mercaderia_vendida',
+        origenCuentaGasto: expenseAccountResolution.source,
+        cuentaGastoMatchItems: expenseAccountResolution.matches,
+        cuentaCostoId: Number(purchase?.gasto) === 1 ? '' : (expenseAccount?.id || ''),
+        cuentaCostoCode: Number(purchase?.gasto) === 1 ? '' : (expenseAccount?.code || ''),
+        cuentaCostoName: Number(purchase?.gasto) === 1 ? '' : (expenseAccount?.name || ''),
+        cuentaCostoType: Number(purchase?.gasto) === 1 ? '' : (expenseAccount?.type || 'COSTO'),
         cuentaGastoId: expenseAccount?.id || '',
         cuentaGastoCode: expenseAccount?.code || '',
         cuentaGastoName: expenseAccount?.name || '',
@@ -826,6 +949,7 @@ module.exports = {
     buildSalesDocs,
     buildSupplierDocs,
     createReferenceContext,
+    resolveExpenseAccount,
     mapCreditState,
     normalizeCurrency,
     resolveBranch
