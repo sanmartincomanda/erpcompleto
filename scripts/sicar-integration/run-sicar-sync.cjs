@@ -6,6 +6,7 @@ const path = require('node:path');
 require('dotenv').config({ path: path.join(process.cwd(), '.env') });
 
 const { loadRuntimeConfig } = require('./config.cjs');
+const { enrichArCreditDocs, enrichArPaymentDocs } = require('./ar-enhancers.cjs');
 const { createFirestoreClient } = require('./firestore-client.cjs');
 const { buildMirrorDocId, cleanString, nowIso, toIsoDate, toNumber, uniqueValues } = require('./helpers.cjs');
 const { createMySqlClient } = require('./mysql-client.cjs');
@@ -562,8 +563,7 @@ const run = async () => {
         }
 
         if (runtimeConfig.cli.modules.includes('ar')) {
-            collections.push({
-                collectionName: 'cuentasPorCobrar',
+            const arCreditDocs = enrichArCreditDocs({
                 docs: buildArCreditDocs({
                     credits: arCredits,
                     abonosByCreditId: arPaymentsByCreditId,
@@ -571,10 +571,14 @@ const run = async () => {
                     salesById,
                     reference,
                     syncedAt: startedAt
-                })
+                }),
+                credits: arCredits,
+                abonosByCreditId: arPaymentsByCreditId,
+                customersById,
+                salesById
             });
-            collections.push({
-                collectionName: 'abonosClientes',
+
+            const arPaymentDocs = enrichArPaymentDocs({
                 docs: buildArPaymentDocs({
                     abonos: allArPayments,
                     creditsById: arCreditsById,
@@ -582,7 +586,20 @@ const run = async () => {
                     salesById,
                     reference,
                     syncedAt: startedAt
-                })
+                }),
+                abonos: allArPayments,
+                creditsById: arCreditsById,
+                customersById,
+                salesById
+            });
+
+            collections.push({
+                collectionName: 'cuentasPorCobrar',
+                docs: arCreditDocs
+            });
+            collections.push({
+                collectionName: 'abonosClientes',
+                docs: arPaymentDocs
             });
         }
 
