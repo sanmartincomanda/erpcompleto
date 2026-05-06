@@ -23,7 +23,11 @@ export const paymentMethodLabel = (method) => {
         transferencia: 'Transferencia',
         cheque: 'Cheque',
         deposito: 'Deposito',
-        tarjeta: 'Tarjeta'
+        tarjeta: 'Tarjeta',
+        vales: 'Vales',
+        sicarpagos: 'Sicar Pagos',
+        mixto: 'Mixto',
+        otro: 'Otro'
     };
 
     return labels[normalized] || (method ? String(method) : 'Sin definir');
