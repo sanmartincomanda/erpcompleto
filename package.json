@@ -1,7 +1,7 @@
 {
   "name": "erp-sanmartin-corregido",
   "version": "2.0.0",
-  "description": "ERP Carnessanmartin Granada - Sistema de gestion contable y financiera",
+  "description": "ERP Carnessanmartin Granada - Sistema de gestiÃ³n contable y financiera",
   "private": true,
   "dependencies": {
     "@capacitor/android": "^8.3.0",
@@ -32,6 +32,7 @@
     "sicar:dry-run": "node scripts/sicar-integration/run-sicar-sync.cjs --mode=dry-run",
     "sicar:live": "node scripts/sicar-integration/run-sicar-sync.cjs --mode=live",
     "sicar:seed-config": "node scripts/sicar-integration/run-sicar-sync.cjs --seed-config",
+    "sicar:seed-expense-articles": "node scripts/sicar-integration/seed-sicar-expense-articles.cjs",
     "sicar:test": "node scripts/sicar-integration/tests/sicar-transform.test.cjs",
     "android:sync": "npm run build && npx cap sync android",
     "android:open": "npx cap open android",
