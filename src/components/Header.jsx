@@ -76,7 +76,7 @@ const Header = ({ sidebarOpen: externalSidebarOpen, setSidebarOpen: externalSetS
             icon: Users,
             items: [
                 { path: '/ventas', label: 'Ventas', icon: TrendingUp },
-                { path: '/cuentas-cobrar', label: 'Cuentas por Cobrar', icon: CreditCard }
+                { path: '/cuentas-cobrar', label: 'Cartera de Cobro', icon: CreditCard }
             ]
         },
         {
